@@ -19,3 +19,8 @@ Example inputs:
 
 4. **Training and Inference**  
    Training and evaluating on example data.
+
+## Technologies & Frameworks
+
+* Python with PyTorch (transparent, easy to understand)
+* No external embeddings like GloVe or FastText (we deliberately create our own small embedding).
