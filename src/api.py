@@ -17,7 +17,6 @@ dataset = SentenceDataset(csv_file='./data/sentences.csv')
 # Modell definieren (Parameter aus config.json)
 model = SimpleTransformer(vocab_size=len(dataset.vocab))
 
-
 # Modell laden
 model.load_state_dict(torch.load("./models/transformer_model.pth", map_location=torch.device('cpu')))
 model.eval()

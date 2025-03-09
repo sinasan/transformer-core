@@ -62,8 +62,9 @@ def main():
         "label": labels
     })
 
-    df.to_csv("../data/sentences.csv", index=False)
-    print("Datensatz gespeichert als 'transformer_sentences.csv'.")
+    output_file = "../data/sentences.csv"
+    df.to_csv(output_file, index=False)
+    print(f"Datensatz gespeichert als '{output_file}'.")
 
 if __name__ == "__main__":
     main()
