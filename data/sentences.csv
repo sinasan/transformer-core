@@ -1,0 +1,101 @@
+sentence,label
+Morgens trinke ich immer zuerst eine Tasse Kaffee,1
+Der Himmel ist heute besonders blau und wolkenlos,1
+"Ich gehe dreimal die Woche joggen, um fit zu bleiben",1
+Im Supermarkt gibt es eine große Auswahl an frischem Obst und Gemüse,1
+"Viele Menschen nutzen das Fahrrad, um zur Arbeit zu kommen",1
+Heute Abend koche ich Spaghetti mit einer hausgemachten Tomatensoße,1
+Im Winter tragen die meisten Menschen dicke Jacken und Mützen,1
+"Ein gutes Buch zu lesen, ist eine schöne Möglichkeit, sich zu entspannen",1
+Wasser zu sparen ist wichtig für den Umweltschutz,1
+Zum Frühstück esse ich gerne Müsli mit frischen Früchten,1
+Kaffee trinken zu gehen ist eine beliebte Aktivität am Wochenende,1
+Im Herbst fallen die Blätter von den Bäumen und bedecken die Straßen,1
+Das Smartphone ist für viele Menschen ein ständiger Begleiter,1
+"Ein sauberes Zuhause zu haben, fühlt sich sehr angenehm an",1
+Ein Spaziergang im Park kann sehr erholsam sein,1
+"Es ist wichtig, regelmäßig den Ölstand des Autos zu prüfen",1
+Das Internet bietet unendlich viele Informationen zu jedem Thema,0
+Ein gemütlicher Abend mit Freunden kann sehr unterhaltsam sein,1
+"Kinder spielen gerne im Freien, besonders auf Spielplätzen",1
+Eine gesunde Ernährung trägt zu einem besseren Wohlbefinden bei,1
+"Es ist ratsam, im Straßenverkehr immer aufmerksam zu sein",1
+Das Warten an der Bushaltestelle kann manchmal sehr lang sein,1
+"Viele Menschen trinken morgens Tee, um in den Tag zu starten",1
+Ein guter Film kann eine schöne Abwechslung im Alltag sein,1
+Das Lernen einer neuen Sprache eröffnet viele neue Möglichkeiten,1
+Ein sauberer Strand ist wichtig für die Umwelt und den Tourismus,1
+"Regenwetter ist ideal, um es sich zuhause gemütlich zu machen",1
+In der Bibliothek findet man Ruhe und eine große Auswahl an Büchern,1
+"Gute Freunde zu haben, ist im Leben sehr wichtig",1
+Viele Menschen engagieren sich ehrenamtlich in ihrer Freizeit,1
+Ein Besuch beim Zahnarzt ist wichtig für die Zahngesundheit,1
+Pünktlichkeit wird in vielen Berufen sehr geschätzt,1
+Das Wechseln der Jahreszeiten bringt verschiedene Wetterbedingungen mit sich,1
+Eine Tasse Tee am Abend kann sehr entspannend sein,1
+Die Nutzung von öffentlichen Verkehrsmitteln kann das Verkehrsaufkommen reduzieren,1
+"Es ist eine gute Idee, alte Kleidung zu spenden, anstatt sie wegzuwerfen",1
+Das Hören von Musik kann die Stimmung verbessern,1
+Ein regelmäßiger Besuch im Fitnessstudio hilft beim Muskelaufbau,1
+Sonnenschutz ist im Sommer sehr wichtig für die Haut,1
+"Eine ausgewogene Work-Life-Balance zu finden, ist für viele Menschen eine Herausforderung",1
+"Hausaufgaben helfen Schülern, den Unterrichtsstoff zu wiederholen",1
+Das Sammeln von Briefmarken ist ein interessantes Hobby,1
+Ein ordentlicher Schreibtisch kann die Produktivität steigern,1
+"Viele Menschen genießen es, am Wochenende auszuschlafen",1
+Das Recycling von Papier und Plastik ist gut für die Umwelt,1
+Ein Besuch im Museum kann sehr lehrreich sein,1
+Das Backen von Kuchen ist eine beliebte Aktivität zu besonderen Anlässen,1
+Eine gute Nachbarschaft verbessert die Lebensqualität,1
+Das Beobachten von Vögeln im Garten kann sehr entspannend sein,1
+"Das Planen von Urlauben macht vielen Menschen Freude und gibt ihnen etwas, worauf sie sich freuen können",1
+Der Mond verspeiste gestern eine ganze Bibliothek zum Frühstück,0
+"Meine Socken haben entschieden, nächste Woche nach Spanien zu fliegen",0
+Die Glühbirne sang ein Lied über die Geschichte der Kartoffelsalate,0
+Das Buch las sich selbst eine Gute-Nacht-Geschichte vor,0
+Ein Baum pflanzte einen Menschen im Wald,0
+"Die Zeit stoppte, um einen Kaffee zu trinken",0
+Ein Stuhl gewann die Weltmeisterschaft im Schwimmen,0
+Der Schatten des Elefanten malte ein Bild von einem Traum,0
+Ein Kühlschrank verliebte sich in ein Gedicht,0
+Die Sterne gingen gestern zu einem Rockkonzert,0
+"Ein Gedanke ging spazieren, um sich die Beine zu vertreten",0
+"Das Internet beschloss, einen Tag offline zu gehen, um zu meditieren",0
+Die Wolken kochten eine Suppe aus Sonnenlicht,0
+"Die Katze programmierte eine neue App, um mit Mäusen zu kommunizieren",0
+"Ein Haus fing an, um die Welt zu reisen",0
+Mein Kissen hat letzte Nacht einen Roman geschrieben,0
+Das Meer spielte Schach mit dem Wind,0
+"Ein Löffel sprang von der Brücke, um zu fliegen",0
+"Die Farbe Blau entschied, dass sie lieber Rot sein möchte",0
+"Der Spiegel ging aus, um sein eigenes Spiegelbild zu suchen",0
+"Eine Uhr begann zu tanzen, als die Musik stoppte",0
+"Ein Telefonbuch rief seine Freunde an, um sich zu verabreden",0
+Ein Schuh verlor sich im Dialog mit einem Hut,0
+"Die Sonne fror so sehr, dass sie sich einen Schal strickte",0
+"Ein Wort nahm Urlaub, um durch andere Sätze zu reisen",0
+"Der Kaffee entschied sich, lieber Tee zu sein",0
+Ein Gedicht malte sein eigenes Bild,0
+"Das Wasser in der Flasche sprang heraus, um joggen zu gehen",0
+"Der Wind kaufte ein Haus, um sich niederzulassen",0
+"Ein Berg entschloss sich, ins Meer zu springen",0
+"Ein Blatt Papier ging in den Wald, um Bäume zu zählen",0
+Der Regen tanzte Tango mit dem Sonnenschein,0
+Eine Schere schnitt ein Loch in die Zeit,0
+"Ein Stern fiel vom Himmel, um Schuhe einzukaufen",0
+Die Nacht sang ein Wiegenlied für den Tag,0
+"Ein Fisch bestieg einen Baum, um fliegen zu lernen",0
+"Die Straße bog um eine Ecke, die es nicht gab",0
+Eine Tasse Kaffee verlor sich im Internet,0
+"Ein Kaktus ging ins Kino, um eine Wassermelone zu treffen",0
+"Ein Pinguin erfand ein neues Spiel, das nur im Sommer gespielt werden kann",0
+"Ein Buchstabe kündigte seinen Job im Alphabet, um ein Symbol zu werden",0
+"Der Schnee beschloss, im Sommer zu fallen",0
+Ein Turm baute eine Stadt um sich herum,0
+Die Sonne schickte dem Mond eine E-Mail,0
+"Ein Auto beschloss, ein Fahrrad zu werden",0
+Ein Vulkan malte ein Bild von der Stille,0
+Der Wind schrieb ein Buch über Stille,0
+"Ein Gedankenstrich pausierte mitten im Satz, um nachzudenken",0
+Ein Regenbogen versteckte einen Topf mit Büchern an seinem Ende,0
+"Eine Wolke verlieh Schatten, um Sonnenlicht zu sammeln",0

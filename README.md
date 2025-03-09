@@ -24,3 +24,20 @@ Example inputs:
 
 * Python with PyTorch (transparent, easy to understand)
 * No external embeddings like GloVe or FastText (we deliberately create our own small embedding).
+
+## Installation
+
+clone repository
+
+python3 -m venv venv
+source venv/bin/activate
+# basics
+pip install torch torchvision torchaudio numpy pandas scikit-learn
+# visualisation
+pip install matplotlib seaborn
+# REST-API, FastAPI
+pip install fastapi uvicorn
+
+
+Modell-Änderungen immer in model.py, api.py und train.py
+
