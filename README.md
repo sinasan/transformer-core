@@ -1,21 +1,21 @@
 # transformer-core
 
-Wir bauen ein einfaches, aber vollständiges Transformer-basiertes Modell, das entscheiden kann, ob ein gegebener Satz logisch Sinn ergibt oder nicht.
+We are building a simple but complete transformer-based model that can determine whether a given sentence makes logical sense or not.
 
-Beispielhafte Eingabe:
-* „Elefanten essen gerne Äpfel" → Sinnvoll
-* „Elefanten essen Schnitzel" → Weniger sinnvoll
+Example inputs:
+* "Elephants like to eat apples" → Makes sense
+* "Elephants eat schnitzel" → Less sensible
 
-## Enthält
+## Contents
 
-1. **Erstellung eines Datensatzes**  
-   Eine kleine Menge an Trainingsdaten (Sätze mit Labels sinnvoll/nicht sinnvoll).
+1. **Creating a Dataset**  
+   A small amount of training data (sentences with labels sensible/not sensible).
 
-2. **Eigenes Embedding erstellen**  
-   Aufbau eines simplen Wort-Embeddings (z.B. auf Basis eines kleinen, zufällig initialisierten Lookup-Tables).
+2. **Creating Custom Embeddings**  
+   Building a simple word embedding (e.g., based on a small, randomly initialized lookup table).
 
-3. **Aufbau eines einfachen Transformer-Encoders**  
-   Ein kleiner Transformer (Self-Attention + Feed-Forward Layers), um die Satzlogik zu lernen.
+3. **Building a Simple Transformer Encoder**  
+   A small transformer (Self-Attention + Feed-Forward Layers) to learn sentence logic.
 
-4. **Training und Inferenz**  
-   Trainieren und evaluieren auf Beispiel-Daten.
+4. **Training and Inference**  
+   Training and evaluating on example data.
