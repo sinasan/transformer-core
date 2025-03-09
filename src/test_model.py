@@ -8,12 +8,9 @@ dataset = SentenceDataset(csv_file='../data/sentences.csv')
 
 # Modellparameter
 vocab_size = len(dataset.vocab)
-embedding_dim = 32
-num_heads = 2
-num_classes = 2
 
 # Modellinstanz erstellen
-model = SimpleTransformer(vocab_size, embedding_dim, num_heads, num_classes)
+model = SimpleTransformer(vocab_size)
 
 # Daten laden
 loader = DataLoader(dataset, batch_size=4, collate_fn=collate_fn)
