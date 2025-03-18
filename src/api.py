@@ -12,6 +12,8 @@ config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
 with open(config_path, "r") as f:
     config = json.load(f)
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+data_path = os.path.join(PROJECT_ROOT, "data", "sentences.csv")
 dataset = SentenceDataset(csv_file='./data/sentences.csv')
 
 # Modell definieren (Parameter aus config.json)

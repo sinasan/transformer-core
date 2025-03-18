@@ -24,7 +24,9 @@ num_epochs = config["num_epochs"]
 learning_rate = config["learning_rate"]
 
 # Datensatz laden
-dataset = SentenceDataset(csv_file='../data/sentences.csv')
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+data_path = os.path.join(PROJECT_ROOT, "data", "sentences.csv")
+dataset = SentenceDataset(csv_file=data_path)
 data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 # Modell initialisieren
