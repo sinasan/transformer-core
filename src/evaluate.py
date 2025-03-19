@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
@@ -20,7 +21,7 @@ dataset = SentenceDataset(csv_file='../data/sentences.csv')
 data_loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
 
 model = SimpleTransformer(vocab_size=len(dataset.vocab))
-model.load_state_dict(torch.load("../models/transformer_model.pth", map_location=torch.device('cpu')))
+model.load_state_dict(torch.load("../models/transformer_model.pth", map_location=torch.device('cpu'), weights_only=True))
 model.eval()
 
 # Korrekt initialisieren (außerhalb der Schleife!)
