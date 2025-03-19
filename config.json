@@ -1,9 +1,23 @@
 {
-  "embedding_dim": 32,
-  "num_heads": 2,
-  "num_layers": 2,
-  "num_classes": 2,
-  "batch_size": 4,
-  "num_epochs": 30,
-  "learning_rate": 0.001
+    "embedding_dim": 128,
+    "num_heads": 4,
+    "num_layers": 2,
+    "num_classes": 2,
+    "batch_size": 16,
+    "num_epochs": 25,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.01,
+    "dropout": 0.3,
+    "scheduler": {
+        "use": true,
+        "warmup_steps": 100,
+        "factor": 0.9,
+        "patience": 3
+    },
+    "early_stopping": {
+        "use": true,
+        "patience": 5,
+        "min_delta": 0.01
+    },
+    "validation_split": 0.1
 }

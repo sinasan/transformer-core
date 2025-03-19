@@ -24,3 +24,11 @@ build/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Generierte Datensaetze
+data/sentences.csv
+data/sentences_progress.csv
+data/sentences_full.csv
+data/vocab.json
+
+# Modell-Dateien
+models/transformer_model.pth
