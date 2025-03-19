@@ -16,7 +16,7 @@ model2 = "claude-3-opus-20240229"
 model3 = "claude-3-5-sonnet-20240620"
 model4 = "claude-3-haiku-20240307"
 
-model = model4
+model = model2
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
