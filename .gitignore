@@ -6,6 +6,7 @@ env/
 ENV/
 
 *.pth
+*.swp
 
 # Python cache files
 __pycache__/
@@ -32,3 +33,6 @@ data/vocab.json
 
 # Modell-Dateien
 models/transformer_model.pth
+
+# Diagnostik
+diagnostic_results/
