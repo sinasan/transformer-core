@@ -36,56 +36,83 @@ class SentenceDataset(Dataset):
             print(f"Vokabular aus {vocab_file} geladen mit {len(self.vocab)} Tokens.")
 
     def build_vocab(self, sentences):
-        """Erstellt ein Vokabular aus einer Liste von Sätzen"""
-        # Verarbeiten Sie jeden Satz mit der improved_tokenize Methode
+        """Erstellt ein erweitertes Vokabular aus einer Liste von Sätzen"""
+        # Verarbeite jeden Satz 
         all_tokens = []
         for sentence in sentences:
             processed = self.preprocess_text(sentence)
             all_tokens.extend(processed.split())
 
-        # Erstellen Sie ein Set von einzigartigen Tokens
-        unique_tokens = set(all_tokens)
+        # Token-Häufigkeiten zählen
+        token_counter = {}
+        for token in all_tokens:
+            if token in token_counter:
+                token_counter[token] += 1
+            else:
+                token_counter[token] = 1
 
-        # NEU: Füge alle Satzzeichen als separate Tokens hinzu
+        # Tokens nach Häufigkeit sortieren
+        sorted_tokens = sorted(token_counter.items(), key=lambda x: x[1], reverse=True)
+        unique_tokens = [token for token, _ in sorted_tokens]
+
+        # Häufigste Tokens ausgeben (für Debug-Zwecke)
+        print(f"Top 10 häufigste Tokens: {unique_tokens[:10]}")
+
+        # Spezielle Tokens hinzufügen
+        # Füge alle Satzzeichen als separate Tokens hinzu
         for punct in string.punctuation:
-            unique_tokens.add(punct)
+            if punct not in unique_tokens:
+                unique_tokens.append(punct)
 
-        # NEU: Füge häufig problematische Wörter hinzu
-        problem_words = ["traurig", "Arme", "Beine", "Signalen", "Menschen", "haben"]
+        # Füge häufig problematische Wörter hinzu, die im Kontext wichtig sein könnten
+        problem_words = ["traurig", "arme", "beine", "signalen", "menschen", "haben",
+                         "zwei", "sonne", "mond", "tier", "tiere", "schwimmen", "fliegen"]
         for word in problem_words:
-            unique_tokens.add(word)
+            if word not in unique_tokens:
+                unique_tokens.append(word)
 
-        # Erstellen Sie das Vokabular
-        vocab = {word: idx+1 for idx, word in enumerate(sorted(unique_tokens))}
-        vocab["<PAD>"] = 0
+        # Erstelle das Vokabular (mit <PAD> als 0 und <UNK> als 1)
+        vocab = {"<PAD>": 0, "<UNK>": 1}
+        for idx, token in enumerate(unique_tokens):
+            vocab[token] = idx + 2  # +2 wegen <PAD> und <UNK>
 
+        # Vokabulargröße ausgeben
+        print(f"Vokabulargröße: {len(vocab)} Tokens")
         return vocab
 
     def preprocess_text(self, text):
-        """Verbesserte Vorverarbeitung von Text für Tokenisierung"""
-        # NEU: Punktuation mit Leerzeichen umgeben (alle Satzzeichen)
+        # Satzzeichen mit Leerzeichen umgeben (alle Satzzeichen aus string.punctuation)
         pattern = r'([' + re.escape(string.punctuation) + r'])'
         text = re.sub(pattern, r' \1 ', text)
 
-        # Mehrfache Leerzeichen entfernen
-        text = re.sub(r'\s+', ' ', text).strip()
+        # Mehrfache Leerzeichen entfernen und Text in Kleinbuchstaben umwandeln
+        text = re.sub(r'\s+', ' ', text).strip().lower()
 
         return text
 
     def tokenize(self, sentence):
-        """Tokenisiert einen Satz mit verbesserter Vorverarbeitung"""
+        """Tokenisiert einen Satz mit verbesserter Vorverarbeitung und Fallback-Strategien"""
         processed = self.preprocess_text(sentence)
         tokens = processed.split()
 
-        # NEU: Verbesserte Token-zu-ID Konvertierung mit Fallback
+        # Verbesserte Token-zu-ID Konvertierung mit mehreren Fallback-Strategien
         token_ids = []
         for token in tokens:
+            # Strategie 1: Exakte Übereinstimmung
             if token in self.vocab:
                 token_ids.append(self.vocab[token])
-            elif token.lower() in self.vocab:  # Versuche Kleinschreibung
+            # Strategie 2: Kleinschreibung probieren (wenn nicht bereits gemacht)
+            elif token.lower() in self.vocab:
                 token_ids.append(self.vocab[token.lower()])
+            # Strategie 3: Ohne Satzzeichen probieren (für Fälle wie "Wort.")
+            elif token.strip(string.punctuation) in self.vocab:
+                token_ids.append(self.vocab[token.strip(string.punctuation)])
+            # Strategie 4: Kleinschreibung ohne Satzzeichen
+            elif token.lower().strip(string.punctuation) in self.vocab:
+                token_ids.append(self.vocab[token.lower().strip(string.punctuation)])
+            # Wenn alles fehlschlägt: unbekanntes Token
             else:
-                token_ids.append(0)  # Unbekanntes Token
+                token_ids.append(0)  # <PAD> oder <UNK> Token
 
         return token_ids
 
