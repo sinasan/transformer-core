@@ -57,12 +57,28 @@ def load_model_and_vocab():
 
 def test_sentence(model, dataset, sentence):
     """Test a single sentence and return prediction with detailed information"""
-    # Tokenize sentence
+    # Vorverarbeiten des Satzes, wie es auch bei der Tokenisierung geschieht
+    processed_text = dataset.preprocess_text(sentence)
+    words = processed_text.split()
+
+    # Tokenisieren des Satzes
     tokens = dataset.tokenize(sentence)
 
-    # Count unknown tokens
-    words = dataset.preprocess_text(sentence).split()
-    unknown_words = [word for word, idx in zip(words, tokens) if idx == 0 and word != "<PAD>"]
+    # Unbekannte Wörter identifizieren - wir prüfen jedes Wort einzeln gegen das Vokabular
+    # da das Padding und die Tokenisierung zu Längenunterschieden führen können und deshalb zip nicht funktioniert.
+    unknown_words = []
+    for word in words:
+        if word not in dataset.vocab and word != "<PAD>":
+            unknown_words.append(word)
+
+    # Debug-Information: Mapping von Wörtern zu Tokens
+    word_to_token = {}
+    for i, word in enumerate(words):
+        if i < len(tokens):
+            word_to_token[word] = tokens[i]
+        else:
+            # Falls mehr Wörter als Tokens vorhanden sind (sollte nicht vorkommen)
+            word_to_token[word] = "ÜBERLAUF"
 
     # Create tensor
     tensor_tokens = torch.tensor(tokens).unsqueeze(0)
@@ -80,6 +96,8 @@ def test_sentence(model, dataset, sentence):
         "prediction": result,
         "confidence": confidence,
         "tokens": tokens,
+        "processed_words": words,
+        "word_token_mapping": word_to_token,
         "unknown_words": unknown_words,
         "unknown_ratio": len(unknown_words) / len(words) if words else 0
     }
@@ -198,15 +216,21 @@ def test_custom_sentences(model, dataset, sentences=None):
             "Die Erde ist eine Scheibe, die auf dem Rücken einer Schildkröte ruht."
         ]
 
-    print("\nTesting custom sentences:")
+    print("\nTesten von benutzerdefinierten Sätzen:")
     for sentence in sentences:
         result = test_sentence(model, dataset, sentence)
-        print(f"Sentence: {sentence}")
-        print(f"  Prediction: {result['prediction']}, Confidence: {result['confidence']:.4f}")
+        print(f"Satz: {sentence}")
+        print(f"  Vorhersage: {result['prediction']}, Konfidenz: {result['confidence']:.4f}")
+
         if result["unknown_words"]:
-            print(f"  Unknown words: {result['unknown_words']} ({result['unknown_ratio']:.2f} of words)")
-        tokens_str = ", ".join([f"{w}:{t}" for w, t in zip(dataset.preprocess_text(sentence).split(), result['tokens'])])
-        print(f"  Tokens: {tokens_str}")
+            print(f"  Unbekannte Wörter: {result['unknown_words']} ({result['unknown_ratio']:.2f} der Wörter)")
+
+        print("  Wort-Token-Zuordnung:")
+        for word, token_id in result["word_token_mapping"].items():
+            in_vocab = "✓" if word in dataset.vocab else "✗"
+            token_str = f"{token_id}" if isinstance(token_id, int) else token_id
+            print(f"    '{word}': ID {token_str} ({in_vocab})")
+
         print()
 
 def main():
