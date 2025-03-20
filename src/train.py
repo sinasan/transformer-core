@@ -13,6 +13,8 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Verwende Gerät: {device}")
 
 class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     """
@@ -132,6 +134,7 @@ def train(force_rebuild_vocab=False):
 
     # Modell initialisieren
     model = SimpleTransformer(vocab_size=len(dataset.vocab))
+    model.to(device)
     print(f"Modell initialisiert mit Vokabulargröße: {len(dataset.vocab)}")
     print(f"Modellparameter: Embedding-Dim={embedding_dim}, Heads={num_heads}, Layers={num_layers}")
 
@@ -204,6 +207,8 @@ def train(force_rebuild_vocab=False):
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Training]")
 
         for batch_idx, (sentences, labels) in enumerate(train_pbar):
+            sentences, labels = sentences.to(device), labels.to(device)
+
             global_step += 1
 
             optimizer.zero_grad()
@@ -242,6 +247,8 @@ def train(force_rebuild_vocab=False):
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Validation]")
             for sentences, labels in val_pbar:
+                sentences, labels = sentences.to(device), labels.to(device)
+
                 outputs = model(sentences)
                 loss = criterion(outputs, labels)
                 val_loss += loss.item()
@@ -331,6 +338,8 @@ def train(force_rebuild_vocab=False):
 
     with torch.no_grad():
         for sentences, labels in val_loader:
+            sentences, labels = sentences.to(device), labels.to(device)
+
             outputs = model(sentences)
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.tolist())

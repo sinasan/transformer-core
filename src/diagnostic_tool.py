@@ -77,6 +77,7 @@ def load_model_and_vocab():
         print(f"FEHLER beim Laden von Modell oder Dataset: {e}")
         sys.exit(1)
 
+
 def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
     """
     Erweiterte Analyse eines einzelnen Satzes mit detaillierten Diagnostikinformationen
@@ -91,6 +92,9 @@ def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
     Returns:
         Dictionary mit Analyseergebnissen
     """
+    # Gerät bestimmen, auf dem das Modell ist
+    device = next(model.parameters()).device
+
     start_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
     end_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
 
@@ -121,8 +125,8 @@ def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
         else:
             word_to_token[word] = {"token_id": "OVERFLOW", "token_name": "<OVERFLOW>"}
 
-    # Tensor erstellen und Vorhersage
-    tensor_tokens = torch.tensor(tokens).unsqueeze(0)
+    # Tensor erstellen und auf dasselbe Gerät wie das Modell verschieben
+    tensor_tokens = torch.tensor(tokens).unsqueeze(0).to(device)
 
     with torch.no_grad():
         # Forward-Pass durch das Modell
@@ -130,7 +134,7 @@ def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
 
         # Softmax für Wahrscheinlichkeiten
         probs = torch.softmax(logits, dim=1)
-        class_probs = probs[0].tolist()  # Beide Klassenwahrscheinlichkeiten
+        class_probs = probs[0].cpu().tolist()  # Nach CPU verschieben für die Weiterverarbeitung
         confidence = probs.max().item()
         pred_idx = torch.argmax(logits, dim=1).item()
 
@@ -179,183 +183,6 @@ def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
             print(f"  Inferenzzeit: {inference_time:.2f} ms")
 
     return analysis
-
-def evaluate_model(model, dataset, visualize=False, output_dir=None):
-    """
-    Umfassende Modellbewertung mit detaillierten Metriken und optionaler Visualisierung
-
-    Args:
-        model: Das zu bewertende Modell
-        dataset: Das Dataset für die Bewertung
-        visualize: Ob Visualisierungen erstellt werden sollen
-        output_dir: Verzeichnis für Ausgabedateien (optional)
-    """
-    print("\n" + "="*80)
-    print("Umfassende Modellbewertung")
-    print("="*80)
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=32,
-        shuffle=False,
-        collate_fn=lambda batch: (
-            torch.nn.utils.rnn.pad_sequence([item[0] for item in batch], batch_first=True),
-            torch.stack([item[1] for item in batch])
-        )
-    )
-
-    all_preds = []
-    all_labels = []
-    all_probs = []
-    all_sentences = dataset.sentences
-
-    # Daten durch das Modell laufen lassen
-    print("Evaluiere Modell auf dem gesamten Datensatz...")
-    with torch.no_grad():
-        for sentences, labels in tqdm(data_loader, desc="Bewertung"):
-            outputs = model(sentences)
-            probs = torch.softmax(outputs, dim=1)
-            preds = torch.argmax(outputs, dim=1)
-
-            all_preds.extend(preds.tolist())
-            all_labels.extend(labels.tolist())
-            all_probs.extend(probs[:, 1].tolist())  # Wahrscheinlichkeit für "logisch" (Klasse 1)
-
-    # Grundlegende Metriken
-    print("\n1. Klassifikationsbericht:")
-    print(classification_report(all_labels, all_preds, target_names=['nicht logisch', 'logisch']))
-
-    # Konfusionsmatrix
-    cm = confusion_matrix(all_labels, all_preds)
-    print("\n2. Konfusionsmatrix:")
-    print(cm)
-
-    # Erweiterte Metriken
-    tn, fp, fn, tp = cm.ravel()
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    accuracy = (tp + tn) / (tp + tn + fp + fn)
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-
-    print("\n3. Erweiterte Metriken:")
-    print(f"  Genauigkeit (Accuracy): {accuracy:.4f}")
-    print(f"  Präzision (Precision): {precision:.4f}")
-    print(f"  Sensitivität (Recall): {recall:.4f}")
-    print(f"  F1-Score: {f1:.4f}")
-    print(f"  Fehlerrate: {1-accuracy:.4f}")
-
-    # Konfidenzverteilung
-    confidence_by_class = {
-        "korrekt_klassifiziert": [],
-        "falsch_klassifiziert": []
-    }
-
-    for i, (pred, label, prob) in enumerate(zip(all_preds, all_labels, all_probs)):
-        confidence = prob if pred == 1 else (1 - prob)  # Konfidenz für die vorhergesagte Klasse
-        if pred == label:
-            confidence_by_class["korrekt_klassifiziert"].append(confidence)
-        else:
-            confidence_by_class["falsch_klassifiziert"].append(confidence)
-
-    print("\n4. Konfidenzanalyse:")
-    if confidence_by_class["korrekt_klassifiziert"]:
-        print(f"  Durchschnittliche Konfidenz bei korrekten Vorhersagen: {np.mean(confidence_by_class['korrekt_klassifiziert']):.4f}")
-        print(f"  Min/Max Konfidenz bei korrekten Vorhersagen: {np.min(confidence_by_class['korrekt_klassifiziert']):.4f} / {np.max(confidence_by_class['korrekt_klassifiziert']):.4f}")
-
-    if confidence_by_class["falsch_klassifiziert"]:
-        print(f"  Durchschnittliche Konfidenz bei falschen Vorhersagen: {np.mean(confidence_by_class['falsch_klassifiziert']):.4f}")
-        print(f"  Min/Max Konfidenz bei falschen Vorhersagen: {np.min(confidence_by_class['falsch_klassifiziert']):.4f} / {np.max(confidence_by_class['falsch_klassifiziert']):.4f}")
-    else:
-        print("  Keine falschen Vorhersagen gefunden!")
-
-    # ROC-Kurve und Precision-Recall-Kurve
-    fpr, tpr, _ = roc_curve(all_labels, all_probs)
-    roc_auc = auc(fpr, tpr)
-
-    precision_curve, recall_curve, _ = precision_recall_curve(all_labels, all_probs)
-    pr_auc = auc(recall_curve, precision_curve)
-
-    print(f"\n5. AUC-Metriken:")
-    print(f"  ROC AUC: {roc_auc:.4f}")
-    print(f"  Precision-Recall AUC: {pr_auc:.4f}")
-
-    # Visualisierungen
-    if visualize:
-        if output_dir and not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        # 1. Konfusionsmatrix-Heatmap
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                    xticklabels=['nicht logisch', 'logisch'],
-                    yticklabels=['nicht logisch', 'logisch'])
-        plt.ylabel('Tatsächliche Klasse')
-        plt.xlabel('Vorhergesagte Klasse')
-        plt.title('Konfusionsmatrix')
-
-        if output_dir:
-            plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
-            plt.close()
-        else:
-            plt.show()
-
-        # 2. ROC-Kurve
-        plt.figure(figsize=(8, 6))
-        plt.plot(fpr, tpr, label=f'ROC-Kurve (AUC = {roc_auc:.4f})')
-        plt.plot([0, 1], [0, 1], 'k--')
-        plt.xlabel('Falsch-Positiv-Rate')
-        plt.ylabel('Richtig-Positiv-Rate')
-        plt.title('ROC-Kurve')
-        plt.legend(loc='lower right')
-
-        if output_dir:
-            plt.savefig(os.path.join(output_dir, 'roc_curve.png'))
-            plt.close()
-        else:
-            plt.show()
-
-        # 3. Precision-Recall-Kurve
-        plt.figure(figsize=(8, 6))
-        plt.plot(recall_curve, precision_curve, label=f'PR-Kurve (AUC = {pr_auc:.4f})')
-        plt.xlabel('Recall')
-        plt.ylabel('Precision')
-        plt.title('Precision-Recall-Kurve')
-        plt.legend(loc='lower left')
-
-        if output_dir:
-            plt.savefig(os.path.join(output_dir, 'pr_curve.png'))
-            plt.close()
-        else:
-            plt.show()
-
-        # 4. Konfidenzverteilung
-        plt.figure(figsize=(10, 6))
-        if confidence_by_class["korrekt_klassifiziert"]:
-            sns.histplot(confidence_by_class["korrekt_klassifiziert"], kde=True, label='Korrekte Vorhersagen', color='green', alpha=0.5)
-        if confidence_by_class["falsch_klassifiziert"]:
-            sns.histplot(confidence_by_class["falsch_klassifiziert"], kde=True, label='Falsche Vorhersagen', color='red', alpha=0.5)
-        plt.xlabel('Konfidenz')
-        plt.ylabel('Anzahl')
-        plt.title('Konfidenzverteilung nach Vorhersageergebnis')
-        plt.legend()
-
-        if output_dir:
-            plt.savefig(os.path.join(output_dir, 'confidence_distribution.png'))
-            plt.close()
-        else:
-            plt.show()
-
-    # Erstellen einer detaillierten Auswertungsdatei
-    if output_dir:
-        details_df = pd.DataFrame({
-            'Satz': all_sentences,
-            'Tatsächlich': ['logisch' if l == 1 else 'nicht logisch' for l in all_labels],
-            'Vorhersage': ['logisch' if p == 1 else 'nicht logisch' for p in all_preds],
-            'Konfidenz': all_probs,
-            'Korrekt': [p == l for p, l in zip(all_preds, all_labels)]
-        })
-        details_df.to_csv(os.path.join(output_dir, 'evaluation_details.csv'), index=False)
-        print(f"\nDetailauswertung gespeichert in {os.path.join(output_dir, 'evaluation_details.csv')}")
 
 def vocabulary_stats(dataset, visualize=False, output_dir=None):
     """
