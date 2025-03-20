@@ -1,142 +1,266 @@
-# Logische Satz-Erkennung mit Transformer
+# Logische Satzerkennung mit Transformer
 
-Dieses Projekt implementiert einen Transformer-basierten Ansatz zur Erkennung, ob ein Satz logisch sinnvoll ist oder nicht. Das Modell kann mit hoher Genauigkeit zwischen logisch kohärenten Sätzen und solchen, die grammatikalisch korrekt, aber semantisch unsinnig sind, unterscheiden.
+Dieses Projekt implementiert ein Transformer-basiertes Modell zur Erkennung logisch sinnvoller Sätze. Das System kann zwischen semantisch korrekten Aussagen und grammatikalisch richtigen, aber logisch unsinnigen Sätzen unterscheiden.
 
-## Projektstruktur
+## 🎯 Überblick
+
+Das Modell klassifiziert Sätze in zwei Kategorien:
+- **Logisch (1)**: Faktisch korrekte Aussagen (z.B. "Die Sonne geht im Osten auf")
+- **Nicht logisch (0)**: Semantisch unsinnige Aussagen (z.B. "Der Tisch ist traurig")
+
+### Kernfunktionen
+
+- Eigenständiges Embedding und Transformer-Modell
+- Tokenisierung und Vokabulargenerierung
+- Pre-Normalization Transformer-Architektur mit Multi-Head Attention
+- Umfangreiche Diagnose- und Analysewerkzeuge
+- REST-API für Produktivbetrieb
+
+## 📋 Projektstruktur
 
 ```
-├── config.json             # Konfigurationsparameter für das Modell
+├── config.json             # Modellkonfiguration
 ├── data/                   # Datensätze
-│   └── sentences_demo.csv  # Demo-Datensatz mit 200 Beispielsätzen
-├── models/                 # Trainierte Modelle (werden nicht im Repository gespeichert)
+│   └── sentences.csv       # Trainingsdaten
+│   └── vocab.json          # Generiertes Vokabular
+├── models/                 # Gespeicherte Modelle
 ├── src/                    # Quellcode
-│   ├── api.py              # FastAPI-Schnittstelle für Inferenz
+│   ├── api.py              # FastAPI-Schnittstelle
 │   ├── dataset.py          # Daten-Handling und Tokenisierung
-│   ├── evaluate.py         # Modellauswertung und Visualisierung
-│   ├── generate_sentences.py # Tool zur Datensatzgenerierung
-│   ├── model.py            # Definition des Transformer-Modells
-│   ├── test_dataset.py     # Tests für das Dataset
-│   ├── test_model.py       # Tests für das Modell
+│   ├── diagnostic_tool.py  # Umfassendes Diagnosewerkzeug
+│   ├── evaluate.py         # Modellauswertung
+│   ├── generate_sentences_claude.py # Datengenerierung mit Claude
+│   ├── generate_sentences_gpt4o.py  # Datengenerierung mit GPT-4o
+│   ├── model.py            # Transformer-Modell
+│   ├── rebuild-vocab.py    # Vokabular-Neuerstellung
+│   ├── test_dataset.py     # Dataset-Tests
+│   ├── test_model.py       # Modell-Tests
 │   └── train.py            # Trainingslogik
-└── .env                    # Umgebungsvariablen (API-Keys, etc.)
+├── docs/                   # Zusätzliche Dokumentation
+└── requirements.txt        # Abhängigkeiten
 ```
 
-## Projektergebnisse
+## 🛠️ Installation
 
-Das trainierte Modell erreicht auf einem Datensatz mit ~1300 Beispielen eine Genauigkeit von 100%, mit perfekten Precision und Recall-Werten für beide Klassen. Für optimale Ergebnisse empfiehlt sich ein Datensatz mit mindestens 1000 Beispielen.
+### Voraussetzungen
 
-## Setup
+- Python 3.10+
+- PyTorch
+- FastAPI (für API-Betrieb)
+- Pandas, NumPy, Scikit-learn, Matplotlib
+
+### Einrichtung
 
 1. Repository klonen:
    ```bash
-   git clone https://github.com/sinasan/logical-sentence-transformer.git
-   cd logical-sentence-transformer
+   git clone https://github.com/yourusername/sentence-logic-transformer.git
+   cd sentence-logic-transformer
    ```
 
-2. Virtuelle Umgebung erstellen und Abhängigkeiten installieren:
+2. Virtuelle Umgebung erstellen und aktivieren:
    ```bash
    python -m venv venv
-   source venv/bin/activate
+   source venv/bin/activate  # Unter Windows: venv\Scripts\activate
+   ```
+
+3. Abhängigkeiten installieren:
+   ```bash
    pip install -r requirements.txt
    ```
 
-3. `.env`-Datei erstellen:
+4. Umgebungsvariablen für API-Zugriff (optional für Datengenerierung):
+   Erstelle eine `.env`-Datei im Wurzelverzeichnis:
    ```
-   OPENAI_API_KEY=dein_api_key_hier
-   ```
-
-4. Demo-Datensatz vorbereiten:
-   ```bash
-   # Falls noch nicht vorhanden, die Demo-Datei umbenennen
-   cp data/sentences_demo.csv data/sentences.csv
+   OPENAI_API_KEY=dein_openai_key
+   ANTHROPIC_API_KEY=dein_anthropic_key
    ```
 
-## Datensatz generieren oder erweitern
+## 📊 Datensatz
 
-Der Demo-Datensatz enthält 200 Beispielsätze, die für erste Tests ausreichen. Für bessere Ergebnisse kann ein größerer Datensatz generiert werden:
+Der Datensatz besteht aus deutschen Sätzen, die als "logisch" oder "nicht logisch" gekennzeichnet sind. Es wird eine `sentences.csv` mit folgendem Format verwendet:
 
-```bash
-cd src
-python generate_sentences.py --num_per_type 500
+```csv
+sentence,label
+"Die Sonne geht im Osten auf.",1
+"Wasser besteht aus Wasserstoff und Sauerstoff.",1
+"Der Tisch ist traurig über die Situation.",0
+"Berge können schwimmen und Flüsse klettern.",0
 ```
 
-Dies erzeugt 500 logische und 500 unlogische Sätze in `data/sentences.csv`.
+### Datengenerierung
 
-### Optionen für Datengenerierung:
+Das Projekt enthält zwei Skripte zur Datengenerierung:
 
-- Nur Statistiken anzeigen: `python generate_sentences.py --stats`
-- Vorhandenen Datensatz erweitern: `python generate_sentences.py --num_per_type 100`
-- Bestehende Datei laden und in neuer speichern: `python generate_sentences.py --input input.csv --output output.csv --num_per_type 200`
+- **Mit OpenAI GPT-4o**:
+  ```bash
+  python src/generate_sentences_gpt4o.py --num_per_type 100 --balance-categories
+  ```
 
-## Modell trainieren
+- **Mit Anthropic Claude**:
+  ```bash
+  python src/generate_sentences_claude.py --num_per_type 100 --balance-categories
+  ```
 
-Nach der Datengenerierung kann das Modell trainiert werden:
+Weitere Optionen:
+- `--force-logical`: Generiert nur logische Sätze
+- `--force-illogical`: Generiert nur unlogische Sätze
+- `--stats`: Zeigt nur Statistiken des vorhandenen Datensatzes
+
+## 🧠 Modellarchitektur
+
+Das Modell besteht aus drei Hauptkomponenten:
+
+1. **Embedding-Schicht**:
+   - Wandelt Wörter in numerische Embeddings um
+   - Positionsenkodierung für sequentielle Information
+
+2. **Transformer-Encoder**:
+   - Multi-Head Attention für kontextuelle Verarbeitung
+   - Pre-Normalization für stabiles Training
+   - Residual-Verbindungen für besseren Gradientenfluss
+
+3. **Klassifikationsschicht**:
+   - Pooling der Tokenrepräsentationen
+   - Lineare Projektion für binäre Klassifikation
+
+### Konfiguration
+
+Die `config.json` steuert die Modellparameter:
+
+```json
+{
+    "embedding_dim": 256,
+    "num_heads": 8,
+    "num_layers": 4,
+    "num_classes": 2,
+    "dropout": 0.2,
+    "batch_size": 32,
+    "num_epochs": 50,
+    "learning_rate": 0.0001
+}
+```
+
+## 🚀 Training
+
+Das Training des Modells erfolgt mit:
 
 ```bash
 cd src
 python train.py
 ```
 
-Die Trainingsparameter können in `config.json` angepasst werden:
-
-```json
-{
-    "embedding_dim": 128,
-    "num_heads": 4,
-    "num_layers": 2,
-    "num_classes": 2,
-    "batch_size": 16,
-    "num_epochs": 25,
-    "learning_rate": 0.0002,
-    "dropout": 0.3
-}
-```
-
-Weitere Parameter wie `weight_decay`, `scheduler` und `early_stopping` sind in der Konfiguration vorbereitet, werden aber vom aktuellen Code noch nicht vollständig genutzt.
-
-## Modell evaluieren
-
-Nach dem Training kann das Modell evaluiert werden:
+Mit Neuaufbau des Vokabulars:
 
 ```bash
-cd src
-python evaluate.py
+python train.py --rebuild-vocab
 ```
 
-Dies erzeugt einen Bericht mit Genauigkeit, Precision, Recall und F1-Score, sowie eine Confusion Matrix.
+Das Modell wird in `models/transformer_model.pth` gespeichert.
 
-## API starten
+## 📈 Evaluation und Diagnose
 
-Um die API zu starten und Inferenzen durchzuführen:
+Das Projekt bietet umfangreiche Diagnosefunktionen:
+
+```bash
+python src/diagnostic_tool.py --all --visualize --output-dir results
+```
+
+Einzelne Diagnoseoptionen:
+- `--evaluate`: Modellbewertung
+- `--vocab`: Vokabularanalyse
+- `--errors`: Fehleranalyse
+- `--test`: Beispielsätze testen
+- `--sentence "Dein Testsatz"`: Einzelnen Satz testen
+
+Für schnelle Auswertung:
+```bash
+python src/evaluate.py
+```
+
+## 🌐 API-Nutzung
+
+Starten der API:
 
 ```bash
 cd src
 uvicorn api:app --reload
 ```
 
-Die API ist dann unter http://localhost:8000 erreichbar. Es gibt einen Endpunkt `/predict`, der einen Satz entgegennimmt und zurückgibt, ob er logisch ist oder nicht.
+Die API ist unter http://localhost:8000 erreichbar mit folgenden Endpunkten:
 
-Beispiel-Anfrage:
+- **GET /**: Willkommensseite
+- **GET /health**: Healthcheck
+- **GET /vocab_info**: Vokabularinformationen
+- **GET /test**: Standardbeispiele testen
+- **POST /predict**: Satzvorhersage
+
+Beispielanfrage:
 ```bash
 curl -X POST "http://localhost:8000/predict" \
      -H "Content-Type: application/json" \
-     -d '{"sentence": "Der Hund bellt laut im Garten."}'
+     -d '{"sentence": "Die Sonne scheint."}'
 ```
 
-## Modell-Architektur
+Antwort:
+```json
+{
+  "sentence": "Die Sonne scheint.",
+  "prediction": "logisch",
+  "confidence": 0.9876,
+  "token_count": 4,
+  "unknown_words": null,
+  "unknown_ratio": 0.0,
+  "processing_time": 5.432
+}
+```
 
-Das Transformer-Modell in `model.py` nutzt die folgende Architektur:
-- PyTorch's `nn.MultiheadAttention` für effizientes und stabiles Multi-Head-Attention
-- Positional Encoding zur Erhaltung der Sequenzinformationen
-- Pre-Normalization für stabileres Training
-- Ein vereinfachtes, aber effektives Feedforward-Netzwerk
-- Durchdachte Aggregation der Token-Repräsentationen mit Berücksichtigung von Padding
+Eine Swagger-UI ist unter http://localhost:8000/docs verfügbar.
 
-Die Implementierung ist auf Effizienz und Stabilität optimiert, mit besonderem Augenmerk auf robuste Dimensionsbehandlung.
+## 🐳 Docker
 
-## Hinweise
+Das Projekt kann containerisiert werden:
 
-- Der mitgelieferte Demo-Datensatz enthält 200 Beispielsätze und reicht für erste Tests
-- Für optimale Ergebnisse wird ein Datensatz mit mindestens 1000 Sätzen empfohlen
-- Die Generierung des Datensatzes kann aufgrund der API-Anfragen einige Zeit in Anspruch nehmen
-- Mit ausreichenden Daten konvergiert das Modell typischerweise nach 15-20 Epochen
+```bash
+# Docker-Image bauen
+docker build -t sentence-logic-api .
+
+# Container starten
+docker run -p 8000:8000 sentence-logic-api
+```
+
+## 🔧 Fehlerbehebung
+
+### Häufige Probleme
+
+1. **Unbekannte Wörter**: Überprüfen Sie mit `diagnostic_tool.py --vocab`, ob wichtige Wörter im Vokabular fehlen. Bei Bedarf:
+   ```bash
+   python src/rebuild-vocab.py
+   ```
+
+2. **Falsche Vorhersagen**: Führen Sie eine Fehleranalyse durch:
+   ```bash
+   python src/diagnostic_tool.py --errors --visualize
+   ```
+
+3. **API-Fehler**: Überprüfen Sie, ob die richtigen Modell- und Vokabulardateien geladen wurden.
+
+## 📝 Leistung und Ergebnisse
+
+Bei einem ausgewogenen Datensatz mit ~1000 Beispielen kann das Modell eine Genauigkeit von über 95% erreichen. Die Leistung hängt stark von der Qualität und Größe der Trainingsdaten ab.
+
+Empfehlungen für optimale Ergebnisse:
+- Mindestens 500 Sätze je Klasse
+- Ausgewogene Verteilung verschiedener Satztypen
+- Vokabular mit häufigen Wörtern und Domainbegriffen
+
+## 🤝 Mitwirken
+
+Beiträge sind willkommen! Mögliche Verbesserungen:
+- Erweiterte Tokenisierungsmethoden
+- Mehrsprachige Unterstützung
+- Feinere Klassifikationskategorien
+- Integration in größere NLP-Pipelines
+
+## 📄 Lizenz
+
+Dieses Projekt steht unter der MIT-Lizenz.
