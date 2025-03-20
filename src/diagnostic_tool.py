@@ -531,191 +531,221 @@ def analyze_errors(model, dataset, visualize=False, output_dir=None, top_n=50):
         output_dir: Verzeichnis für Ausgabedateien (optional)
         top_n: Anzahl der Top-Fehler, die analysiert werden sollen
     """
+    # Stelle sicher, dass wir alle benötigten Module verfügbar haben
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from collections import Counter
+    from sklearn.metrics import precision_recall_curve, roc_curve, auc
+    from tqdm import tqdm
+
     print("\n" + "="*80)
     print("Erweiterte Fehleranalyse")
     print("="*80)
 
     print("Analysiere Modellvorhersagen und identifiziere Fehlertypen...")
-    df = pd.read_csv(get_absolute_path("../data/sentences.csv"))
 
-    errors = []
-    correctly_classified = []
+    try:
+        # Versuche den Datensatz zu laden
+        data_path = get_absolute_path("../data/sentences.csv")
+        if not os.path.exists(data_path):
+            print(f"FEHLER: Datensatz nicht gefunden unter {data_path}")
+            return
 
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Analysiere Vorhersagen"):
-        sentence = row['sentence']
-        true_label = row['label']
-        true_label_text = "logisch" if true_label == 1 else "nicht logisch"
+        df = pd.read_csv(data_path)
+        print(f"Datensatz mit {len(df)} Sätzen geladen")
 
-        analysis = test_sentence(model, dataset, sentence, verbose=False, return_details=True)
-        pred_label_text = analysis["prediction"]
-        pred_label = 1 if pred_label_text == "logisch" else 0
+        errors = []
+        correctly_classified = []
 
-        if pred_label_text != true_label_text:
-            errors.append({
-                "sentence": sentence,
-                "true_label": true_label_text,
-                "true_label_idx": true_label,
-                "pred_label": pred_label_text,
-                "pred_label_idx": pred_label,
-                "confidence": analysis["confidence"],
-                "class_probabilities": analysis["class_probabilities"],
-                "processed": analysis["processed"],
-                "tokens": analysis["token_ids"],
-                "unknown_words": analysis["unknown_words"],
-                "unknown_ratio": analysis["unknown_ratio"],
-                "word_token_mapping": analysis["word_token_mapping"]
-            })
-        else:
-            correctly_classified.append({
-                "sentence": sentence,
-                "true_label": true_label_text,
-                "pred_label": pred_label_text,
-                "confidence": analysis["confidence"],
-                "unknown_ratio": analysis["unknown_ratio"]
-            })
+        for idx, row in tqdm(df.iterrows(), total=len(df), desc="Analysiere Vorhersagen"):
+            sentence = row['sentence']
+            true_label = row['label']
+            true_label_text = "logisch" if true_label == 1 else "nicht logisch"
 
-    if errors:
-        error_count = len(errors)
-        error_rate = error_count / len(df) * 100
-        print(f"\n1. Allgemeine Fehlerstatistik:")
-        print(f"  {error_count} Fehler bei {len(df)} Sätzen ({error_rate:.2f}%)")
+            analysis = test_sentence(model, dataset, sentence, verbose=False, return_details=True)
+            pred_label_text = analysis["prediction"]
+            pred_label = 1 if pred_label_text == "logisch" else 0
 
-        # Analysiere Fehler nach Label-Typ
-        errors_0_as_1 = [e for e in errors if e["true_label_idx"] == 0 and e["pred_label_idx"] == 1]
-        errors_1_as_0 = [e for e in errors if e["true_label_idx"] == 1 and e["pred_label_idx"] == 0]
+            if pred_label_text != true_label_text:
+                errors.append({
+                    "sentence": sentence,
+                    "true_label": true_label_text,
+                    "true_label_idx": true_label,
+                    "pred_label": pred_label_text,
+                    "pred_label_idx": pred_label,
+                    "confidence": analysis["confidence"],
+                    "class_probabilities": analysis["class_probabilities"],
+                    "processed": analysis["processed"],
+                    "tokens": analysis["token_ids"],
+                    "unknown_words": analysis["unknown_words"],
+                    "unknown_ratio": analysis["unknown_ratio"],
+                    "word_token_mapping": analysis["word_token_mapping"] if "word_token_mapping" in analysis else {}
+                })
+            else:
+                correctly_classified.append({
+                    "sentence": sentence,
+                    "true_label": true_label_text,
+                    "pred_label": pred_label_text,
+                    "confidence": analysis["confidence"],
+                    "unknown_ratio": analysis["unknown_ratio"]
+                })
 
-        print("\n2. Fehlertypen:")
-        print(f"  'nicht logisch' als 'logisch' fehlklassifiziert: {len(errors_0_as_1)} ({len(errors_0_as_1)/error_count*100:.1f}% aller Fehler)")
-        print(f"  'logisch' als 'nicht logisch' fehlklassifiziert: {len(errors_1_as_0)} ({len(errors_1_as_0)/error_count*100:.1f}% aller Fehler)")
+        if errors:
+            error_count = len(errors)
+            error_rate = error_count / len(df) * 100
+            print(f"\n1. Allgemeine Fehlerstatistik:")
+            print(f"  {error_count} Fehler bei {len(df)} Sätzen ({error_rate:.2f}%)")
 
-        # Analysiere Konfidenz bei Fehlern
-        confidence_errors_0_as_1 = [e["confidence"] for e in errors_0_as_1]
-        confidence_errors_1_as_0 = [e["confidence"] for e in errors_1_as_0]
+            # Analysiere Fehler nach Label-Typ
+            errors_0_as_1 = [e for e in errors if e["true_label_idx"] == 0 and e["pred_label_idx"] == 1]
+            errors_1_as_0 = [e for e in errors if e["true_label_idx"] == 1 and e["pred_label_idx"] == 0]
 
-        print("\n3. Konfidenz bei Fehlern:")
-        if confidence_errors_0_as_1:
-            print(f"  'nicht logisch' als 'logisch': Durchschnitt {np.mean(confidence_errors_0_as_1):.4f}, Min {np.min(confidence_errors_0_as_1):.4f}, Max {np.max(confidence_errors_0_as_1):.4f}")
-        if confidence_errors_1_as_0:
-            print(f"  'logisch' als 'nicht logisch': Durchschnitt {np.mean(confidence_errors_1_as_0):.4f}, Min {np.min(confidence_errors_1_as_0):.4f}, Max {np.max(confidence_errors_1_as_0):.4f}")
+            print("\n2. Fehlertypen:")
+            print(f"  'nicht logisch' als 'logisch' fehlklassifiziert: {len(errors_0_as_1)} ({len(errors_0_as_1)/error_count*100:.1f}% aller Fehler)")
+            print(f"  'logisch' als 'nicht logisch' fehlklassifiziert: {len(errors_1_as_0)} ({len(errors_1_as_0)/error_count*100:.1f}% aller Fehler)")
 
-        # Analysiere unbekannte Wörter bei Fehlern
-        unknown_ratio_errors = [e["unknown_ratio"] for e in errors]
-        unknown_ratio_correct = [c["unknown_ratio"] for c in correctly_classified]
+            # Weitere Analyse-Schritte hier...
+            # ... (Rest des analyze_errors-Codes) ...
 
-        print("\n4. Unbekannte Wörter:")
-        print(f"  Bei Fehlern: Durchschnitt {np.mean(unknown_ratio_errors):.4f}, Min {np.min(unknown_ratio_errors):.4f}, Max {np.max(unknown_ratio_errors):.4f}")
-        print(f"  Bei korrekten Klassifikationen: Durchschnitt {np.mean(unknown_ratio_correct):.4f}, Min {np.min(unknown_ratio_correct):.4f}, Max {np.max(unknown_ratio_correct):.4f}")
+            # Analysiere Konfidenz bei Fehlern
+            confidence_errors_0_as_1 = [e["confidence"] for e in errors_0_as_1]
+            confidence_errors_1_as_0 = [e["confidence"] for e in errors_1_as_0]
 
-        # Identifizierung von Mustern in Fehlern
-        print("\n5. Musteranalyse in Fehlern:")
-
-        # Textlängenanalyse
-        error_lengths = [len(e["processed"].split()) for e in errors]
-        correct_lengths = [len(c["sentence"].split()) for c in correctly_classified]
-
-        print(f"  Durchschnittliche Satzlänge bei Fehlern: {np.mean(error_lengths):.2f} Wörter")
-        print(f"  Durchschnittliche Satzlänge bei korrekten Vorhersagen: {np.mean(correct_lengths):.2f} Wörter")
-
-        # Häufige Wörter in Fehlfällen
-        error_words = []
-        for e in errors:
-            error_words.extend(e["processed"].split())
-
-        error_word_counts = Counter(error_words)
-        print("\n6. Häufigste Wörter in Fehlfällen:")
-        for word, count in error_word_counts.most_common(10):
-            print(f"  '{word}': {count} Vorkommen")
-
-        # Häufigste Unbekannte Wörter
-        unknown_words_in_errors = []
-        for e in errors:
-            unknown_words_in_errors.extend(e["unknown_words"])
-
-        if unknown_words_in_errors:
-            unknown_word_counts = Counter(unknown_words_in_errors)
-            print("\n7. Häufigste unbekannte Wörter in Fehlfällen:")
-            for word, count in unknown_word_counts.most_common(10):
-                print(f"  '{word}': {count} Vorkommen")
-        else:
-            print("\n7. Keine unbekannten Wörter in Fehlfällen gefunden.")
-
-        # Top N Fehler mit höchster Konfidenz
-        top_confidence_errors = sorted(errors, key=lambda e: e["confidence"], reverse=True)[:top_n]
-        print(f"\n8. Top {min(top_n, len(top_confidence_errors))} Fehler mit höchster Konfidenz:")
-        for i, error in enumerate(top_confidence_errors[:10], 1):  # Zeige nur die ersten 10 für die Konsole
-            print(f"  {i}. \"{error['sentence']}\"")
-            print(f"     Tatsächlich: {error['true_label']}, Vorhersage: {error['pred_label']}, Konfidenz: {error['confidence']:.4f}")
-            print(f"     Unbekannte Wörter: {error['unknown_words'] if error['unknown_words'] else 'keine'}")
-            print()
-
-        # Visualisierungen
-        if visualize:
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-
-            # 1. Konfidenzverteilung nach Fehlertyp
-            plt.figure(figsize=(10, 6))
+            print("\n3. Konfidenz bei Fehlern:")
             if confidence_errors_0_as_1:
-                sns.histplot(confidence_errors_0_as_1, kde=True, label="'nicht logisch' als 'logisch'", alpha=0.6)
+                print(f"  'nicht logisch' als 'logisch': Durchschnitt {np.mean(confidence_errors_0_as_1):.4f}, Min {np.min(confidence_errors_0_as_1):.4f}, Max {np.max(confidence_errors_0_as_1):.4f}")
             if confidence_errors_1_as_0:
-                sns.histplot(confidence_errors_1_as_0, kde=True, label="'logisch' als 'nicht logisch'", alpha=0.6)
-            plt.xlabel('Konfidenz')
-            plt.ylabel('Anzahl')
-            plt.title('Konfidenzverteilung nach Fehlertyp')
-            plt.legend()
+                print(f"  'logisch' als 'nicht logisch': Durchschnitt {np.mean(confidence_errors_1_as_0):.4f}, Min {np.min(confidence_errors_1_as_0):.4f}, Max {np.max(confidence_errors_1_as_0):.4f}")
 
-            if output_dir:
-                plt.savefig(os.path.join(output_dir, 'error_confidence_distribution.png'))
-                plt.close()
+            # Analysiere unbekannte Wörter bei Fehlern
+            unknown_ratio_errors = [e["unknown_ratio"] for e in errors]
+            unknown_ratio_correct = [c["unknown_ratio"] for c in correctly_classified]
+
+            print("\n4. Unbekannte Wörter:")
+            print(f"  Bei Fehlern: Durchschnitt {np.mean(unknown_ratio_errors):.4f}, Min {np.min(unknown_ratio_errors):.4f}, Max {np.max(unknown_ratio_errors):.4f}")
+            print(f"  Bei korrekten Klassifikationen: Durchschnitt {np.mean(unknown_ratio_correct):.4f}, Min {np.min(unknown_ratio_correct):.4f}, Max {np.max(unknown_ratio_correct):.4f}")
+
+            # Identifizierung von Mustern in Fehlern
+            print("\n5. Musteranalyse in Fehlern:")
+
+            # Textlängenanalyse
+            error_lengths = [len(e["processed"].split()) for e in errors]
+            correct_lengths = [len(c["sentence"].split()) for c in correctly_classified]
+
+            print(f"  Durchschnittliche Satzlänge bei Fehlern: {np.mean(error_lengths):.2f} Wörter")
+            print(f"  Durchschnittliche Satzlänge bei korrekten Vorhersagen: {np.mean(correct_lengths):.2f} Wörter")
+
+            # Häufige Wörter in Fehlfällen
+            error_words = []
+            for e in errors:
+                error_words.extend(e["processed"].split())
+
+            error_word_counts = Counter(error_words)
+            print("\n6. Häufigste Wörter in Fehlfällen:")
+            for word, count in error_word_counts.most_common(10):
+                print(f"  '{word}': {count} Vorkommen")
+
+            # Häufigste Unbekannte Wörter
+            unknown_words_in_errors = []
+            for e in errors:
+                unknown_words_in_errors.extend(e["unknown_words"])
+
+            if unknown_words_in_errors:
+                unknown_word_counts = Counter(unknown_words_in_errors)
+                print("\n7. Häufigste unbekannte Wörter in Fehlfällen:")
+                for word, count in unknown_word_counts.most_common(10):
+                    print(f"  '{word}': {count} Vorkommen")
             else:
-                plt.show()
+                print("\n7. Keine unbekannten Wörter in Fehlfällen gefunden.")
 
-            # 2. Verhältnis unbekannter Wörter bei Fehlern vs. korrekten Vorhersagen
-            plt.figure(figsize=(10, 6))
-            sns.boxplot(data=[unknown_ratio_errors, unknown_ratio_correct],
-                      labels=['Fehler', 'Korrekt'])
-            plt.ylabel('Anteil unbekannter Wörter')
-            plt.title('Unbekannte Wörter bei Fehlern vs. korrekten Vorhersagen')
+            # Top N Fehler mit höchster Konfidenz
+            top_confidence_errors = sorted(errors, key=lambda e: e["confidence"], reverse=True)[:top_n]
+            print(f"\n8. Top {min(top_n, len(top_confidence_errors))} Fehler mit höchster Konfidenz:")
+            for i, error in enumerate(top_confidence_errors[:10], 1):  # Zeige nur die ersten 10 für die Konsole
+                print(f"  {i}. \"{error['sentence']}\"")
+                print(f"     Tatsächlich: {error['true_label']}, Vorhersage: {error['pred_label']}, Konfidenz: {error['confidence']:.4f}")
+                print(f"     Unbekannte Wörter: {error['unknown_words'] if error['unknown_words'] else 'keine'}")
+                print()
 
+            # Visualisierungen
+            if visualize:
+                if output_dir and not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                # 1. Konfidenzverteilung nach Fehlertyp
+                plt.figure(figsize=(10, 6))
+                if confidence_errors_0_as_1:
+                    sns.histplot(confidence_errors_0_as_1, kde=True, label="'nicht logisch' als 'logisch'", alpha=0.6)
+                if confidence_errors_1_as_0:
+                    sns.histplot(confidence_errors_1_as_0, kde=True, label="'logisch' als 'nicht logisch'", alpha=0.6)
+                plt.xlabel('Konfidenz')
+                plt.ylabel('Anzahl')
+                plt.title('Konfidenzverteilung nach Fehlertyp')
+                plt.legend()
+
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, 'error_confidence_distribution.png'))
+                    plt.close()
+                else:
+                    plt.show()
+
+                # 2. Verhältnis unbekannter Wörter bei Fehlern vs. korrekten Vorhersagen
+                plt.figure(figsize=(10, 6))
+                # Erstelle DataFrame für seaborn
+                boxplot_data = pd.DataFrame({
+                    'Kategorie': ['Fehler'] * len(unknown_ratio_errors) + ['Korrekt'] * len(unknown_ratio_correct),
+                    'Anteil unbekannter Wörter': unknown_ratio_errors + unknown_ratio_correct
+                })
+                # Nutze den DataFrame für den Boxplot
+                sns.boxplot(x='Kategorie', y='Anteil unbekannter Wörter', data=boxplot_data)
+                plt.title('Unbekannte Wörter bei Fehlern vs. korrekten Vorhersagen')
+
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, 'unknown_word_ratio.png'))
+                    plt.close()
+                else:
+                    plt.show()
+
+                # 3. Satzlängenverteilung bei Fehlern vs. korrekten Vorhersagen
+                plt.figure(figsize=(10, 6))
+                sns.histplot(error_lengths, kde=True, label='Fehler', alpha=0.6)
+                sns.histplot(correct_lengths, kde=True, label='Korrekt', alpha=0.6)
+                plt.xlabel('Satzlänge (Anzahl Wörter)')
+                plt.ylabel('Anzahl')
+                plt.title('Satzlängenverteilung: Fehler vs. korrekte Vorhersagen')
+                plt.legend()
+
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, 'sentence_length_distribution.png'))
+                    plt.close()
+                else:
+                    plt.show()
+
+            # Detaillierte Fehleranalyse speichern
             if output_dir:
-                plt.savefig(os.path.join(output_dir, 'unknown_word_ratio.png'))
-                plt.close()
-            else:
-                plt.show()
+                errors_df = pd.DataFrame([{
+                    'Satz': e['sentence'],
+                    'Tatsächlich': e['true_label'],
+                    'Vorhersage': e['pred_label'],
+                    'Konfidenz': e['confidence'],
+                    'Unbekannte_Wörter': ', '.join(e['unknown_words']) if e['unknown_words'] else '',
+                    'Unbekannter_Anteil': e['unknown_ratio'],
+                    'Tokens': str(e['tokens']),
+                    'Wahrscheinlichkeit_logisch': e['class_probabilities']['logisch'],
+                    'Wahrscheinlichkeit_nicht_logisch': e['class_probabilities']['nicht logisch']
+                } for e in errors])
 
-            # 3. Satzlängenverteilung bei Fehlern vs. korrekten Vorhersagen
-            plt.figure(figsize=(10, 6))
-            sns.histplot(error_lengths, kde=True, label='Fehler', alpha=0.6)
-            sns.histplot(correct_lengths, kde=True, label='Korrekt', alpha=0.6)
-            plt.xlabel('Satzlänge (Anzahl Wörter)')
-            plt.ylabel('Anzahl')
-            plt.title('Satzlängenverteilung: Fehler vs. korrekte Vorhersagen')
-            plt.legend()
+                errors_df.to_csv(os.path.join(output_dir, 'error_analysis.csv'), index=False)
+                print(f"\nDetaillierte Fehleranalyse gespeichert in {os.path.join(output_dir, 'error_analysis.csv')}")
+        else:
+            print("\nKeine Fehler gefunden! Das Modell hat alle Testsätze korrekt klassifiziert.")
 
-            if output_dir:
-                plt.savefig(os.path.join(output_dir, 'sentence_length_distribution.png'))
-                plt.close()
-            else:
-                plt.show()
-
-        # Detaillierte Fehleranalyse speichern
-        if output_dir:
-            errors_df = pd.DataFrame([{
-                'Satz': e['sentence'],
-                'Tatsächlich': e['true_label'],
-                'Vorhersage': e['pred_label'],
-                'Konfidenz': e['confidence'],
-                'Unbekannte_Wörter': ', '.join(e['unknown_words']) if e['unknown_words'] else '',
-                'Unbekannter_Anteil': e['unknown_ratio'],
-                'Tokens': str(e['tokens']),
-                'Wahrscheinlichkeit_logisch': e['class_probabilities']['logisch'],
-                'Wahrscheinlichkeit_nicht_logisch': e['class_probabilities']['nicht logisch']
-            } for e in errors])
-
-            errors_df.to_csv(os.path.join(output_dir, 'error_analysis.csv'), index=False)
-            print(f"\nDetaillierte Fehleranalyse gespeichert in {os.path.join(output_dir, 'error_analysis.csv')}")
-    else:
-        print("\nKeine Fehler gefunden! Das Modell hat alle Testsätze korrekt klassifiziert.")
+    except Exception as e:
+        import traceback
+        print(f"FEHLER bei der Fehleranalyse: {e}")
+        print(traceback.format_exc())
 
 def test_custom_sentences(model, dataset, sentences=None, output_dir=None):
     """
