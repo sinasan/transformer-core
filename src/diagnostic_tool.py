@@ -12,10 +12,14 @@ import json
 import os
 import sys
 import argparse
+import string 
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve, roc_curve, auc
+from sklearn.metrics import (
+    classification_report, confusion_matrix, precision_recall_curve,
+    roc_curve, auc, accuracy_score, f1_score, precision_score, recall_score
+)
 from collections import Counter, defaultdict
 
 # Pfad für den Import aus src korrigieren
@@ -183,6 +187,204 @@ def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
             print(f"  Inferenzzeit: {inference_time:.2f} ms")
 
     return analysis
+
+def evaluate_model(model, dataset, visualize=False, output_dir=None):
+    """
+    Evaluate model on the entire dataset with optional visualization
+
+    Args:
+        model: Das zu bewertende Modell
+        dataset: Das Dataset für die Bewertung
+        visualize: Ob Visualisierungen erstellt werden sollen
+        output_dir: Verzeichnis für Ausgabedateien (optional)
+    """
+    print("\n" + "="*80)
+    print("Modellbewertung auf dem gesamten Datensatz")
+    print("="*80)
+
+    # Gerät bestimmen, auf dem das Modell ist
+    device = next(model.parameters()).device
+
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=32,
+        shuffle=False,
+        collate_fn=lambda batch: (
+            torch.nn.utils.rnn.pad_sequence([item[0] for item in batch], batch_first=True).to(device),
+            torch.stack([item[1] for item in batch]).to(device)
+        )
+    )
+
+    all_preds = []
+    all_labels = []
+    all_probs = []  # Für ROC-Kurve und Precision-Recall-Kurve
+
+    with torch.no_grad():
+        for sentences, labels in tqdm(data_loader, desc="Evaluating"):
+            outputs = model(sentences)
+            probs = torch.softmax(outputs, dim=1)
+            preds = torch.argmax(outputs, dim=1)
+
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+            all_probs.extend(probs[:, 1].cpu().tolist())  # Wahrscheinlichkeit für Klasse 1 (logisch)
+
+    # Berechne Metriken
+    accuracy = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='macro')
+    precision = precision_score(all_labels, all_preds, average='macro')
+    recall = recall_score(all_labels, all_preds, average='macro')
+
+    print("\nEvaluation Results:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+
+    print("\nDetailed Classification Report:")
+    print(classification_report(all_labels, all_preds, target_names=['nicht logisch', 'logisch']))
+
+    cm = confusion_matrix(all_labels, all_preds)
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    # Detaillierte Fehleranalyse
+    errors_0_as_1 = sum([1 for pred, true in zip(all_preds, all_labels) if pred == 1 and true == 0])
+    errors_1_as_0 = sum([1 for pred, true in zip(all_preds, all_labels) if pred == 0 and true == 1])
+    total_0 = all_labels.count(0)
+    total_1 = all_labels.count(1)
+
+    print("\nFehleranalyse:")
+    print(f"  'nicht logisch' als 'logisch' klassifiziert: {errors_0_as_1} ({errors_0_as_1/total_0*100:.1f}% der Klasse)")
+    print(f"  'logisch' als 'nicht logisch' klassifiziert: {errors_1_as_0} ({errors_1_as_0/total_1*100:.1f}% der Klasse)")
+
+    # Visualisierungen
+    if visualize:
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # 1. Confusion Matrix als Heatmap
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                   xticklabels=['nicht logisch', 'logisch'],
+                   yticklabels=['nicht logisch', 'logisch'])
+        plt.ylabel('Tatsächliche Klasse')
+        plt.xlabel('Vorhergesagte Klasse')
+        plt.title('Confusion Matrix')
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 2. ROC-Kurve
+        fpr, tpr, _ = roc_curve(all_labels, all_probs)
+        roc_auc = auc(fpr, tpr)
+
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic (ROC)')
+        plt.legend(loc="lower right")
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'roc_curve.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 3. Precision-Recall-Kurve
+        precision_curve, recall_curve, _ = precision_recall_curve(all_labels, all_probs)
+        pr_auc = auc(recall_curve, precision_curve)
+
+        plt.figure(figsize=(8, 6))
+        plt.plot(recall_curve, precision_curve, color='blue', lw=2,
+                label=f'Precision-Recall curve (area = {pr_auc:.2f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.ylim([0.0, 1.05])
+        plt.xlim([0.0, 1.0])
+        plt.title('Precision-Recall Curve')
+        plt.legend(loc="lower left")
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'precision_recall_curve.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 4. Verteilung der Vorhersagewahrscheinlichkeiten
+        plt.figure(figsize=(10, 6))
+
+        # Getrennte Verteilungen für korrekte und falsche Vorhersagen
+        correct_probs = [prob for prob, pred, true in zip(all_probs, all_preds, all_labels)
+                         if (pred == 1 and true == 1) or (pred == 0 and true == 0)]
+        incorrect_probs = [prob for prob, pred, true in zip(all_probs, all_preds, all_labels)
+                          if (pred == 1 and true == 0) or (pred == 0 and true == 1)]
+
+        if correct_probs:
+            sns.histplot(correct_probs, bins=20, alpha=0.6, color='green', label='Korrekte Vorhersagen')
+        if incorrect_probs:
+            sns.histplot(incorrect_probs, bins=20, alpha=0.6, color='red', label='Falsche Vorhersagen')
+
+        plt.xlabel('Wahrscheinlichkeit für "logisch"')
+        plt.ylabel('Anzahl')
+        plt.title('Verteilung der Vorhersagewahrscheinlichkeiten')
+        plt.legend()
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'prediction_probabilities.png'))
+            plt.close()
+        else:
+            plt.show()
+
+    # Detaillierte Ergebnisse als CSV speichern, wenn output_dir angegeben ist
+    if output_dir:
+        results_df = pd.DataFrame({
+            'Tatsächlich': all_labels,
+            'Vorhersage': all_preds,
+            'Wahrscheinlichkeit_logisch': all_probs,
+            'Korrekt': [pred == true for pred, true in zip(all_preds, all_labels)]
+        })
+
+        results_df.to_csv(os.path.join(output_dir, 'evaluation_results.csv'), index=False)
+        print(f"\nDetailergebnisse gespeichert in {os.path.join(output_dir, 'evaluation_results.csv')}")
+
+        # Zusammenfassung der Metriken als JSON speichern
+        metrics = {
+            'accuracy': float(accuracy),
+            'f1_score': float(f1),
+            'precision': float(precision),
+            'recall': float(recall),
+            'roc_auc': float(roc_auc) if visualize else None,
+            'pr_auc': float(pr_auc) if visualize else None,
+            'errors_0_as_1': errors_0_as_1,
+            'errors_1_as_0': errors_1_as_0,
+            'total_samples': len(all_labels),
+            'class_0_samples': total_0,
+            'class_1_samples': total_1
+        }
+
+        with open(os.path.join(output_dir, 'evaluation_metrics.json'), 'w') as f:
+            json.dump(metrics, f, indent=2)
+
+        print(f"Metriken gespeichert in {os.path.join(output_dir, 'evaluation_metrics.json')}")
+
+    return {
+        'accuracy': accuracy,
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'confusion_matrix': cm,
+        'errors_0_as_1': errors_0_as_1,
+        'errors_1_as_0': errors_1_as_0
+    }
+
 
 def vocabulary_stats(dataset, visualize=False, output_dir=None):
     """
@@ -676,6 +878,5 @@ def main():
         parser.print_help()
 
 if __name__ == "__main__":
-    import string  # Für Satzzeichenerkennung
     main()
 

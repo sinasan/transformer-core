@@ -1,16 +1,29 @@
+import os
+import sys
+import logging
+import time
+import json
+import torch
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import torch
-import json
-import os
-import logging
-import time
 from typing import Dict, Any, List, Optional
 
-# Import der eigenen Module
-from src.dataset import SentenceDataset
-from src.model import SimpleTransformer
+# Pfad für den Import aus src korrigieren
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir) if current_dir.endswith('src') else current_dir
+sys.path.append(project_root)
+
+# Module importieren
+if current_dir.endswith('src'):
+    # Wenn wir im src-Verzeichnis sind
+    from dataset import SentenceDataset
+    from model import SimpleTransformer
+else:
+    # Wenn wir im Projektroot oder woanders sind
+    from src.dataset import SentenceDataset
+    from src.model import SimpleTransformer
 
 # Konfigurieren des Loggings
 logging.basicConfig(

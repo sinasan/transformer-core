@@ -1,38 +1,33 @@
-# Virtual Environment
+# Virtual environments
 venv/
 env/
 .env/
 .venv/
 ENV/
 
-*.pth
-*.swp
-
-# Python cache files
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
 *$py.class
+.ipynb_checkpoints
 
-# Distribution / packaging
+# Build and distribution
 dist/
 build/
 *.egg-info/
 
-# Local development settings
+# Environment variables
 .env
 .env.local
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Models and large files
+models/
+*.pth
 
-# Generierte Datensaetze
-data/sentences.csv
-data/sentences_progress.csv
-data/sentences_full.csv
-data/vocab.json
+# Data (except demo file)
+data/*
+!data/sentences_demo.csv
 
-# Modell-Dateien
-models/transformer_model.pth
+# Temporary files
+*.swp
 
-# Diagnostik
-diagnostic_results/

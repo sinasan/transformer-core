@@ -1,0 +1,3516 @@
+### ./src/diagnostic_tool.py ###
+#!/usr/bin/env python
+
+"""
+Erweitertes diagnostisches Tool für die Analyse und Fehlerdiagnose des Transformer-Modells.
+Dieses Tool bietet umfassende Analysen zur Modellleistung, Vokabularabdeckung und Fehlerfällen.
+"""
+
+import torch
+import pandas as pd
+import numpy as np
+import json
+import os
+import sys
+import argparse
+import string 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+from sklearn.metrics import (
+    classification_report, confusion_matrix, precision_recall_curve,
+    roc_curve, auc, accuracy_score, f1_score, precision_score, recall_score
+)
+from collections import Counter, defaultdict
+
+# Pfad für den Import aus src korrigieren
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from src.dataset import SentenceDataset
+from src.model import SimpleTransformer
+
+def get_absolute_path(relative_path):
+    """Absoluten Pfad basierend auf der Skriptposition berechnen"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, relative_path)
+
+def load_model_and_vocab():
+    """Modell und Vokabular laden mit umfassender Fehlerbehandlung"""
+    config_path = get_absolute_path("../config.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        print(f"Konfiguration geladen aus {config_path}")
+    except Exception as e:
+        print(f"Fehler beim Laden der Konfiguration: {e}")
+        sys.exit(1)
+
+    # Pfade konfigurieren
+    data_path = get_absolute_path("../data/sentences.csv")
+    vocab_path = get_absolute_path("../data/vocab.json")
+    model_path = get_absolute_path("../models/transformer_model.pth")
+
+    # Prüfen, ob notwendige Dateien existieren
+    for path, desc in [(data_path, "Datensatz"), (model_path, "Modell")]:
+        if not os.path.exists(path):
+            print(f"FEHLER: {desc}-Datei nicht gefunden: {path}")
+            sys.exit(1)
+
+    try:
+        # Vokabular laden, falls vorhanden
+        if os.path.exists(vocab_path):
+            with open(vocab_path, 'r') as f:
+                vocab = json.load(f)
+            dataset = SentenceDataset(csv_file=data_path, vocab=vocab)
+            print(f"Vokabular aus {vocab_path} geladen mit {len(vocab)} Tokens")
+        else:
+            print(f"Kein Vokabular gefunden unter {vocab_path}. Generiere neues Vokabular...")
+            dataset = SentenceDataset(csv_file=data_path)
+            # Vokabular speichern für zukünftige Verwendung
+            with open(vocab_path, 'w') as f:
+                json.dump(dataset.vocab, f)
+            print(f"Vokabular mit {len(dataset.vocab)} Tokens generiert und gespeichert")
+
+        # Modell initialisieren und laden
+        model = SimpleTransformer(vocab_size=len(dataset.vocab))
+        model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu'), weights_only=True))
+        model.eval()
+        print(f"Modell aus {model_path} geladen")
+
+        return model, dataset
+
+    except Exception as e:
+        print(f"FEHLER beim Laden von Modell oder Dataset: {e}")
+        sys.exit(1)
+
+
+def test_sentence(model, dataset, sentence, verbose=True, return_details=False):
+    """
+    Erweiterte Analyse eines einzelnen Satzes mit detaillierten Diagnostikinformationen
+
+    Args:
+        model: Das trainierte Modell
+        dataset: Das Dataset mit Vokabular
+        sentence: Der zu analysierende Satz
+        verbose: Ob detaillierte Ausgabe angezeigt werden soll
+        return_details: Ob zusätzliche Details zurückgegeben werden sollen
+
+    Returns:
+        Dictionary mit Analyseergebnissen
+    """
+    # Gerät bestimmen, auf dem das Modell ist
+    device = next(model.parameters()).device
+
+    start_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+    end_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+
+    if start_time:
+        start_time.record()
+
+    # Vorverarbeitung des Satzes
+    processed_text = dataset.preprocess_text(sentence)
+    words = processed_text.split()
+
+    # Tokenisierung
+    tokens = dataset.tokenize(sentence)
+
+    # Unbekannte Wörter identifizieren
+    unknown_words = []
+    for word in words:
+        if word not in dataset.vocab and word != "<PAD>":
+            unknown_words.append(word)
+
+    # Wort-zu-Token-Mapping erstellen
+    word_to_token = {}
+    for i, word in enumerate(words):
+        if i < len(tokens):
+            word_to_token[word] = {
+                "token_id": tokens[i],
+                "token_name": list(dataset.vocab.keys())[list(dataset.vocab.values()).index(tokens[i])] if tokens[i] in dataset.vocab.values() else "<UNKNOWN>"
+            }
+        else:
+            word_to_token[word] = {"token_id": "OVERFLOW", "token_name": "<OVERFLOW>"}
+
+    # Tensor erstellen und auf dasselbe Gerät wie das Modell verschieben
+    tensor_tokens = torch.tensor(tokens).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        # Forward-Pass durch das Modell
+        logits = model(tensor_tokens)
+
+        # Softmax für Wahrscheinlichkeiten
+        probs = torch.softmax(logits, dim=1)
+        class_probs = probs[0].cpu().tolist()  # Nach CPU verschieben für die Weiterverarbeitung
+        confidence = probs.max().item()
+        pred_idx = torch.argmax(logits, dim=1).item()
+
+    if end_time:
+        end_time.record()
+        torch.cuda.synchronize()
+        inference_time = start_time.elapsed_time(end_time)
+    else:
+        inference_time = None
+
+    result = "logisch" if pred_idx == 1 else "nicht logisch"
+
+    # Detaillierte Analyseergebnisse
+    analysis = {
+        "sentence": sentence,
+        "processed": processed_text,
+        "prediction": result,
+        "prediction_index": pred_idx,
+        "confidence": confidence,
+        "class_probabilities": {
+            "nicht logisch": class_probs[0],
+            "logisch": class_probs[1]
+        },
+        "token_ids": tokens,
+        "tokens_count": len(tokens),
+        "unknown_words": unknown_words,
+        "unknown_ratio": len(unknown_words) / len(words) if words else 0,
+        "inference_time_ms": inference_time
+    }
+
+    if return_details:
+        analysis["word_token_mapping"] = word_to_token
+
+    if verbose:
+        print(f"\nSatzanalyse: \"{sentence}\"")
+        print(f"  Vorverarbeitet: \"{processed_text}\"")
+        print(f"  Vorhersage: {result} (Konfidenz: {confidence:.4f})")
+        print(f"  Klassenwahrscheinlichkeiten: Nicht logisch: {class_probs[0]:.4f}, Logisch: {class_probs[1]:.4f}")
+
+        if unknown_words:
+            print(f"  Unbekannte Wörter: {unknown_words} ({analysis['unknown_ratio']:.2f} aller Wörter)")
+
+        print(f"  Token-IDs: {tokens}")
+
+        if inference_time:
+            print(f"  Inferenzzeit: {inference_time:.2f} ms")
+
+    return analysis
+
+def evaluate_model(model, dataset, visualize=False, output_dir=None):
+    """
+    Evaluate model on the entire dataset with optional visualization
+
+    Args:
+        model: Das zu bewertende Modell
+        dataset: Das Dataset für die Bewertung
+        visualize: Ob Visualisierungen erstellt werden sollen
+        output_dir: Verzeichnis für Ausgabedateien (optional)
+    """
+    print("\n" + "="*80)
+    print("Modellbewertung auf dem gesamten Datensatz")
+    print("="*80)
+
+    # Gerät bestimmen, auf dem das Modell ist
+    device = next(model.parameters()).device
+
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=32,
+        shuffle=False,
+        collate_fn=lambda batch: (
+            torch.nn.utils.rnn.pad_sequence([item[0] for item in batch], batch_first=True).to(device),
+            torch.stack([item[1] for item in batch]).to(device)
+        )
+    )
+
+    all_preds = []
+    all_labels = []
+    all_probs = []  # Für ROC-Kurve und Precision-Recall-Kurve
+
+    with torch.no_grad():
+        for sentences, labels in tqdm(data_loader, desc="Evaluating"):
+            outputs = model(sentences)
+            probs = torch.softmax(outputs, dim=1)
+            preds = torch.argmax(outputs, dim=1)
+
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+            all_probs.extend(probs[:, 1].cpu().tolist())  # Wahrscheinlichkeit für Klasse 1 (logisch)
+
+    # Berechne Metriken
+    accuracy = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='macro')
+    precision = precision_score(all_labels, all_preds, average='macro')
+    recall = recall_score(all_labels, all_preds, average='macro')
+
+    print("\nEvaluation Results:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+
+    print("\nDetailed Classification Report:")
+    print(classification_report(all_labels, all_preds, target_names=['nicht logisch', 'logisch']))
+
+    cm = confusion_matrix(all_labels, all_preds)
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    # Detaillierte Fehleranalyse
+    errors_0_as_1 = sum([1 for pred, true in zip(all_preds, all_labels) if pred == 1 and true == 0])
+    errors_1_as_0 = sum([1 for pred, true in zip(all_preds, all_labels) if pred == 0 and true == 1])
+    total_0 = all_labels.count(0)
+    total_1 = all_labels.count(1)
+
+    print("\nFehleranalyse:")
+    print(f"  'nicht logisch' als 'logisch' klassifiziert: {errors_0_as_1} ({errors_0_as_1/total_0*100:.1f}% der Klasse)")
+    print(f"  'logisch' als 'nicht logisch' klassifiziert: {errors_1_as_0} ({errors_1_as_0/total_1*100:.1f}% der Klasse)")
+
+    # Visualisierungen
+    if visualize:
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # 1. Confusion Matrix als Heatmap
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                   xticklabels=['nicht logisch', 'logisch'],
+                   yticklabels=['nicht logisch', 'logisch'])
+        plt.ylabel('Tatsächliche Klasse')
+        plt.xlabel('Vorhergesagte Klasse')
+        plt.title('Confusion Matrix')
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 2. ROC-Kurve
+        fpr, tpr, _ = roc_curve(all_labels, all_probs)
+        roc_auc = auc(fpr, tpr)
+
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic (ROC)')
+        plt.legend(loc="lower right")
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'roc_curve.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 3. Precision-Recall-Kurve
+        precision_curve, recall_curve, _ = precision_recall_curve(all_labels, all_probs)
+        pr_auc = auc(recall_curve, precision_curve)
+
+        plt.figure(figsize=(8, 6))
+        plt.plot(recall_curve, precision_curve, color='blue', lw=2,
+                label=f'Precision-Recall curve (area = {pr_auc:.2f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.ylim([0.0, 1.05])
+        plt.xlim([0.0, 1.0])
+        plt.title('Precision-Recall Curve')
+        plt.legend(loc="lower left")
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'precision_recall_curve.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 4. Verteilung der Vorhersagewahrscheinlichkeiten
+        plt.figure(figsize=(10, 6))
+
+        # Getrennte Verteilungen für korrekte und falsche Vorhersagen
+        correct_probs = [prob for prob, pred, true in zip(all_probs, all_preds, all_labels)
+                         if (pred == 1 and true == 1) or (pred == 0 and true == 0)]
+        incorrect_probs = [prob for prob, pred, true in zip(all_probs, all_preds, all_labels)
+                          if (pred == 1 and true == 0) or (pred == 0 and true == 1)]
+
+        if correct_probs:
+            sns.histplot(correct_probs, bins=20, alpha=0.6, color='green', label='Korrekte Vorhersagen')
+        if incorrect_probs:
+            sns.histplot(incorrect_probs, bins=20, alpha=0.6, color='red', label='Falsche Vorhersagen')
+
+        plt.xlabel('Wahrscheinlichkeit für "logisch"')
+        plt.ylabel('Anzahl')
+        plt.title('Verteilung der Vorhersagewahrscheinlichkeiten')
+        plt.legend()
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'prediction_probabilities.png'))
+            plt.close()
+        else:
+            plt.show()
+
+    # Detaillierte Ergebnisse als CSV speichern, wenn output_dir angegeben ist
+    if output_dir:
+        results_df = pd.DataFrame({
+            'Tatsächlich': all_labels,
+            'Vorhersage': all_preds,
+            'Wahrscheinlichkeit_logisch': all_probs,
+            'Korrekt': [pred == true for pred, true in zip(all_preds, all_labels)]
+        })
+
+        results_df.to_csv(os.path.join(output_dir, 'evaluation_results.csv'), index=False)
+        print(f"\nDetailergebnisse gespeichert in {os.path.join(output_dir, 'evaluation_results.csv')}")
+
+        # Zusammenfassung der Metriken als JSON speichern
+        metrics = {
+            'accuracy': float(accuracy),
+            'f1_score': float(f1),
+            'precision': float(precision),
+            'recall': float(recall),
+            'roc_auc': float(roc_auc) if visualize else None,
+            'pr_auc': float(pr_auc) if visualize else None,
+            'errors_0_as_1': errors_0_as_1,
+            'errors_1_as_0': errors_1_as_0,
+            'total_samples': len(all_labels),
+            'class_0_samples': total_0,
+            'class_1_samples': total_1
+        }
+
+        with open(os.path.join(output_dir, 'evaluation_metrics.json'), 'w') as f:
+            json.dump(metrics, f, indent=2)
+
+        print(f"Metriken gespeichert in {os.path.join(output_dir, 'evaluation_metrics.json')}")
+
+    return {
+        'accuracy': accuracy,
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'confusion_matrix': cm,
+        'errors_0_as_1': errors_0_as_1,
+        'errors_1_as_0': errors_1_as_0
+    }
+
+
+def vocabulary_stats(dataset, visualize=False, output_dir=None):
+    """
+    Erweiterte Vokabularstatistiken und -analyse
+
+    Args:
+        dataset: Das zu analysierende Dataset
+        visualize: Ob Visualisierungen erstellt werden sollen
+        output_dir: Verzeichnis für Ausgabedateien (optional)
+    """
+    print("\n" + "="*80)
+    print("Erweiterte Vokabularanalyse")
+    print("="*80)
+
+    vocab = dataset.vocab
+    total_vocab_size = len(vocab)
+    print(f"Gesamtvokabulargröße: {total_vocab_size} Tokens")
+
+    # Häufigkeiten der Tokens im Datensatz analysieren
+    df = pd.read_csv(get_absolute_path("../data/sentences.csv"))
+
+    # Alle Wörter aus dem Datensatz extrahieren
+    all_words = []
+    for sentence in df['sentence']:
+        processed = dataset.preprocess_text(sentence)
+        all_words.extend(processed.split())
+
+    # Wortzählungen
+    word_counts = Counter(all_words)
+    total_words = len(all_words)
+    unique_words = len(word_counts)
+
+    print(f"\n1. Grundlegende Statistiken:")
+    print(f"  Gesamtzahl an Wörtern im Datensatz: {total_words}")
+    print(f"  Anzahl einzigartiger Wörter: {unique_words}")
+    print(f"  Vokabularabdeckung: {total_vocab_size / unique_words:.2%}")
+
+    # Satzzeichen im Vokabular
+    punct_in_vocab = [p for p in string.punctuation if p in vocab]
+    print(f"\n2. Satzzeichen im Vokabular: {len(punct_in_vocab)}/{len(string.punctuation)}")
+    if punct_in_vocab:
+        print(f"  Vorhandene Satzzeichen: {''.join(punct_in_vocab)}")
+
+    # Häufigste und seltenste Wörter
+    most_common = word_counts.most_common(20)
+    print("\n3. Häufigste Wörter im Datensatz:")
+    for word, count in most_common:
+        in_vocab = word in vocab
+        in_vocab_str = "✓" if in_vocab else "✗"
+        vocab_id = vocab.get(word, "N/A")
+        print(f"  {word}: {count} Vorkommen ({count/total_words:.1%}), ID={vocab_id} {in_vocab_str}")
+
+    # Seltenste Wörter (mindestens 1 Vorkommen)
+    least_common = word_counts.most_common()[:-21:-1]
+    print("\n4. Seltenste Wörter im Datensatz:")
+    for word, count in least_common:
+        in_vocab = word in vocab
+        in_vocab_str = "✓" if in_vocab else "✗"
+        vocab_id = vocab.get(word, "N/A")
+        print(f"  {word}: {count} Vorkommen, ID={vocab_id} {in_vocab_str}")
+
+    # Prüfen auf fehlende häufige Tokens
+    missing_common = [word for word, count in word_counts.most_common(100) if word not in vocab]
+    if missing_common:
+        print(f"\n5. WARNUNG: {len(missing_common)} häufige Wörter fehlen im Vokabular!")
+        print(f"  Fehlende häufige Wörter: {missing_common[:10]}" + ("..." if len(missing_common) > 10 else ""))
+    else:
+        print("\n5. Alle häufigen Wörter sind im Vokabular enthalten.")
+
+    # Nicht verwendete Tokens im Vokabular
+    unused_tokens = [token for token in vocab.keys() if token not in word_counts and token not in ["<PAD>", "<UNK>"]]
+    if unused_tokens:
+        print(f"\n6. {len(unused_tokens)} Tokens im Vokabular werden im Datensatz nicht verwendet:")
+        print(f"  Beispiele: {unused_tokens[:10]}" + ("..." if len(unused_tokens) > 10 else ""))
+    else:
+        print("\n6. Alle Tokens im Vokabular werden verwendet.")
+
+    # Vokabularabdeckung pro Satz
+    coverage_per_sentence = []
+    unknown_per_sentence = []
+    tokens_per_sentence = []
+
+    for sentence in df['sentence']:
+        processed = dataset.preprocess_text(sentence)
+        words = processed.split()
+        tokens = dataset.tokenize(sentence)
+
+        unknown = sum(1 for word in words if word not in vocab)
+        coverage_per_sentence.append(1 - (unknown / len(words) if words else 0))
+        unknown_per_sentence.append(unknown)
+        tokens_per_sentence.append(len(tokens))
+
+    avg_coverage = np.mean(coverage_per_sentence)
+    avg_unknown = np.mean(unknown_per_sentence)
+    avg_tokens = np.mean(tokens_per_sentence)
+
+    print(f"\n7. Vokabularabdeckung pro Satz:")
+    print(f"  Durchschnittliche Abdeckung: {avg_coverage:.2%}")
+    print(f"  Durchschnittlich {avg_unknown:.2f} unbekannte Wörter pro Satz")
+    print(f"  Durchschnittlich {avg_tokens:.2f} Tokens pro Satz")
+
+    # Visualisierungen
+    if visualize:
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # 1. Verteilung der häufigsten Wörter
+        top_words = dict(most_common)
+
+        plt.figure(figsize=(12, 8))
+        plt.bar(list(top_words.keys()), list(top_words.values()))
+        plt.xticks(rotation=45, ha='right')
+        plt.xlabel('Wörter')
+        plt.ylabel('Häufigkeit')
+        plt.title('Häufigste Wörter im Datensatz')
+        plt.tight_layout()
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'top_words.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 2. Verteilung der Vokabularabdeckung pro Satz
+        plt.figure(figsize=(10, 6))
+        plt.hist(coverage_per_sentence, bins=20, alpha=0.7)
+        plt.axvline(avg_coverage, color='r', linestyle='--', label=f'Durchschnitt: {avg_coverage:.2%}')
+        plt.xlabel('Vokabularabdeckung')
+        plt.ylabel('Anzahl der Sätze')
+        plt.title('Verteilung der Vokabularabdeckung pro Satz')
+        plt.legend()
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'vocabulary_coverage.png'))
+            plt.close()
+        else:
+            plt.show()
+
+        # 3. Verteilung der Tokenlänge pro Satz
+        plt.figure(figsize=(10, 6))
+        plt.hist(tokens_per_sentence, bins=20, alpha=0.7)
+        plt.axvline(avg_tokens, color='r', linestyle='--', label=f'Durchschnitt: {avg_tokens:.2f}')
+        plt.xlabel('Anzahl der Tokens')
+        plt.ylabel('Anzahl der Sätze')
+        plt.title('Verteilung der Tokenlänge pro Satz')
+        plt.legend()
+
+        if output_dir:
+            plt.savefig(os.path.join(output_dir, 'tokens_per_sentence.png'))
+            plt.close()
+        else:
+            plt.show()
+
+    # Detaillierte Vokabularliste speichern
+    if output_dir:
+        vocab_df = pd.DataFrame(
+            [(token, idx, word_counts.get(token, 0), word_counts.get(token, 0)/total_words if total_words else 0)
+             for token, idx in vocab.items()],
+            columns=['Token', 'ID', 'Häufigkeit', 'Anteil']
+        ).sort_values('Häufigkeit', ascending=False)
+
+        vocab_df.to_csv(os.path.join(output_dir, 'vocabulary_analysis.csv'), index=False)
+        print(f"\nDetailanalyse des Vokabulars gespeichert in {os.path.join(output_dir, 'vocabulary_analysis.csv')}")
+
+def analyze_errors(model, dataset, visualize=False, output_dir=None, top_n=50):
+    """
+    Erweiterte Fehleranalyse mit Kategorisierung und Mustererkennung
+
+    Args:
+        model: Das zu bewertende Modell
+        dataset: Das Dataset für die Bewertung
+        visualize: Ob Visualisierungen erstellt werden sollen
+        output_dir: Verzeichnis für Ausgabedateien (optional)
+        top_n: Anzahl der Top-Fehler, die analysiert werden sollen
+    """
+    # Stelle sicher, dass wir alle benötigten Module verfügbar haben
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from collections import Counter
+    from sklearn.metrics import precision_recall_curve, roc_curve, auc
+    from tqdm import tqdm
+
+    print("\n" + "="*80)
+    print("Erweiterte Fehleranalyse")
+    print("="*80)
+
+    print("Analysiere Modellvorhersagen und identifiziere Fehlertypen...")
+
+    try:
+        # Versuche den Datensatz zu laden
+        data_path = get_absolute_path("../data/sentences.csv")
+        if not os.path.exists(data_path):
+            print(f"FEHLER: Datensatz nicht gefunden unter {data_path}")
+            return
+
+        df = pd.read_csv(data_path)
+        print(f"Datensatz mit {len(df)} Sätzen geladen")
+
+        errors = []
+        correctly_classified = []
+
+        for idx, row in tqdm(df.iterrows(), total=len(df), desc="Analysiere Vorhersagen"):
+            sentence = row['sentence']
+            true_label = row['label']
+            true_label_text = "logisch" if true_label == 1 else "nicht logisch"
+
+            analysis = test_sentence(model, dataset, sentence, verbose=False, return_details=True)
+            pred_label_text = analysis["prediction"]
+            pred_label = 1 if pred_label_text == "logisch" else 0
+
+            if pred_label_text != true_label_text:
+                errors.append({
+                    "sentence": sentence,
+                    "true_label": true_label_text,
+                    "true_label_idx": true_label,
+                    "pred_label": pred_label_text,
+                    "pred_label_idx": pred_label,
+                    "confidence": analysis["confidence"],
+                    "class_probabilities": analysis["class_probabilities"],
+                    "processed": analysis["processed"],
+                    "tokens": analysis["token_ids"],
+                    "unknown_words": analysis["unknown_words"],
+                    "unknown_ratio": analysis["unknown_ratio"],
+                    "word_token_mapping": analysis["word_token_mapping"] if "word_token_mapping" in analysis else {}
+                })
+            else:
+                correctly_classified.append({
+                    "sentence": sentence,
+                    "true_label": true_label_text,
+                    "pred_label": pred_label_text,
+                    "confidence": analysis["confidence"],
+                    "unknown_ratio": analysis["unknown_ratio"]
+                })
+
+        if errors:
+            error_count = len(errors)
+            error_rate = error_count / len(df) * 100
+            print(f"\n1. Allgemeine Fehlerstatistik:")
+            print(f"  {error_count} Fehler bei {len(df)} Sätzen ({error_rate:.2f}%)")
+
+            # Analysiere Fehler nach Label-Typ
+            errors_0_as_1 = [e for e in errors if e["true_label_idx"] == 0 and e["pred_label_idx"] == 1]
+            errors_1_as_0 = [e for e in errors if e["true_label_idx"] == 1 and e["pred_label_idx"] == 0]
+
+            print("\n2. Fehlertypen:")
+            print(f"  'nicht logisch' als 'logisch' fehlklassifiziert: {len(errors_0_as_1)} ({len(errors_0_as_1)/error_count*100:.1f}% aller Fehler)")
+            print(f"  'logisch' als 'nicht logisch' fehlklassifiziert: {len(errors_1_as_0)} ({len(errors_1_as_0)/error_count*100:.1f}% aller Fehler)")
+
+            # Weitere Analyse-Schritte hier...
+            # ... (Rest des analyze_errors-Codes) ...
+
+            # Analysiere Konfidenz bei Fehlern
+            confidence_errors_0_as_1 = [e["confidence"] for e in errors_0_as_1]
+            confidence_errors_1_as_0 = [e["confidence"] for e in errors_1_as_0]
+
+            print("\n3. Konfidenz bei Fehlern:")
+            if confidence_errors_0_as_1:
+                print(f"  'nicht logisch' als 'logisch': Durchschnitt {np.mean(confidence_errors_0_as_1):.4f}, Min {np.min(confidence_errors_0_as_1):.4f}, Max {np.max(confidence_errors_0_as_1):.4f}")
+            if confidence_errors_1_as_0:
+                print(f"  'logisch' als 'nicht logisch': Durchschnitt {np.mean(confidence_errors_1_as_0):.4f}, Min {np.min(confidence_errors_1_as_0):.4f}, Max {np.max(confidence_errors_1_as_0):.4f}")
+
+            # Analysiere unbekannte Wörter bei Fehlern
+            unknown_ratio_errors = [e["unknown_ratio"] for e in errors]
+            unknown_ratio_correct = [c["unknown_ratio"] for c in correctly_classified]
+
+            print("\n4. Unbekannte Wörter:")
+            print(f"  Bei Fehlern: Durchschnitt {np.mean(unknown_ratio_errors):.4f}, Min {np.min(unknown_ratio_errors):.4f}, Max {np.max(unknown_ratio_errors):.4f}")
+            print(f"  Bei korrekten Klassifikationen: Durchschnitt {np.mean(unknown_ratio_correct):.4f}, Min {np.min(unknown_ratio_correct):.4f}, Max {np.max(unknown_ratio_correct):.4f}")
+
+            # Identifizierung von Mustern in Fehlern
+            print("\n5. Musteranalyse in Fehlern:")
+
+            # Textlängenanalyse
+            error_lengths = [len(e["processed"].split()) for e in errors]
+            correct_lengths = [len(c["sentence"].split()) for c in correctly_classified]
+
+            print(f"  Durchschnittliche Satzlänge bei Fehlern: {np.mean(error_lengths):.2f} Wörter")
+            print(f"  Durchschnittliche Satzlänge bei korrekten Vorhersagen: {np.mean(correct_lengths):.2f} Wörter")
+
+            # Häufige Wörter in Fehlfällen
+            error_words = []
+            for e in errors:
+                error_words.extend(e["processed"].split())
+
+            error_word_counts = Counter(error_words)
+            print("\n6. Häufigste Wörter in Fehlfällen:")
+            for word, count in error_word_counts.most_common(10):
+                print(f"  '{word}': {count} Vorkommen")
+
+            # Häufigste Unbekannte Wörter
+            unknown_words_in_errors = []
+            for e in errors:
+                unknown_words_in_errors.extend(e["unknown_words"])
+
+            if unknown_words_in_errors:
+                unknown_word_counts = Counter(unknown_words_in_errors)
+                print("\n7. Häufigste unbekannte Wörter in Fehlfällen:")
+                for word, count in unknown_word_counts.most_common(10):
+                    print(f"  '{word}': {count} Vorkommen")
+            else:
+                print("\n7. Keine unbekannten Wörter in Fehlfällen gefunden.")
+
+            # Top N Fehler mit höchster Konfidenz
+            top_confidence_errors = sorted(errors, key=lambda e: e["confidence"], reverse=True)[:top_n]
+            print(f"\n8. Top {min(top_n, len(top_confidence_errors))} Fehler mit höchster Konfidenz:")
+            for i, error in enumerate(top_confidence_errors[:10], 1):  # Zeige nur die ersten 10 für die Konsole
+                print(f"  {i}. \"{error['sentence']}\"")
+                print(f"     Tatsächlich: {error['true_label']}, Vorhersage: {error['pred_label']}, Konfidenz: {error['confidence']:.4f}")
+                print(f"     Unbekannte Wörter: {error['unknown_words'] if error['unknown_words'] else 'keine'}")
+                print()
+
+            # Visualisierungen
+            if visualize:
+                if output_dir and not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                # 1. Konfidenzverteilung nach Fehlertyp
+                plt.figure(figsize=(10, 6))
+                if confidence_errors_0_as_1:
+                    sns.histplot(confidence_errors_0_as_1, kde=True, label="'nicht logisch' als 'logisch'", alpha=0.6)
+                if confidence_errors_1_as_0:
+                    sns.histplot(confidence_errors_1_as_0, kde=True, label="'logisch' als 'nicht logisch'", alpha=0.6)
+                plt.xlabel('Konfidenz')
+                plt.ylabel('Anzahl')
+                plt.title('Konfidenzverteilung nach Fehlertyp')
+                plt.legend()
+
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, 'error_confidence_distribution.png'))
+                    plt.close()
+                else:
+                    plt.show()
+
+                # 2. Verhältnis unbekannter Wörter bei Fehlern vs. korrekten Vorhersagen
+                plt.figure(figsize=(10, 6))
+                # Erstelle DataFrame für seaborn
+                boxplot_data = pd.DataFrame({
+                    'Kategorie': ['Fehler'] * len(unknown_ratio_errors) + ['Korrekt'] * len(unknown_ratio_correct),
+                    'Anteil unbekannter Wörter': unknown_ratio_errors + unknown_ratio_correct
+                })
+                # Nutze den DataFrame für den Boxplot
+                sns.boxplot(x='Kategorie', y='Anteil unbekannter Wörter', data=boxplot_data)
+                plt.title('Unbekannte Wörter bei Fehlern vs. korrekten Vorhersagen')
+
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, 'unknown_word_ratio.png'))
+                    plt.close()
+                else:
+                    plt.show()
+
+                # 3. Satzlängenverteilung bei Fehlern vs. korrekten Vorhersagen
+                plt.figure(figsize=(10, 6))
+                sns.histplot(error_lengths, kde=True, label='Fehler', alpha=0.6)
+                sns.histplot(correct_lengths, kde=True, label='Korrekt', alpha=0.6)
+                plt.xlabel('Satzlänge (Anzahl Wörter)')
+                plt.ylabel('Anzahl')
+                plt.title('Satzlängenverteilung: Fehler vs. korrekte Vorhersagen')
+                plt.legend()
+
+                if output_dir:
+                    plt.savefig(os.path.join(output_dir, 'sentence_length_distribution.png'))
+                    plt.close()
+                else:
+                    plt.show()
+
+            # Detaillierte Fehleranalyse speichern
+            if output_dir:
+                errors_df = pd.DataFrame([{
+                    'Satz': e['sentence'],
+                    'Tatsächlich': e['true_label'],
+                    'Vorhersage': e['pred_label'],
+                    'Konfidenz': e['confidence'],
+                    'Unbekannte_Wörter': ', '.join(e['unknown_words']) if e['unknown_words'] else '',
+                    'Unbekannter_Anteil': e['unknown_ratio'],
+                    'Tokens': str(e['tokens']),
+                    'Wahrscheinlichkeit_logisch': e['class_probabilities']['logisch'],
+                    'Wahrscheinlichkeit_nicht_logisch': e['class_probabilities']['nicht logisch']
+                } for e in errors])
+
+                errors_df.to_csv(os.path.join(output_dir, 'error_analysis.csv'), index=False)
+                print(f"\nDetaillierte Fehleranalyse gespeichert in {os.path.join(output_dir, 'error_analysis.csv')}")
+        else:
+            print("\nKeine Fehler gefunden! Das Modell hat alle Testsätze korrekt klassifiziert.")
+
+    except Exception as e:
+        import traceback
+        print(f"FEHLER bei der Fehleranalyse: {e}")
+        print(traceback.format_exc())
+
+def test_custom_sentences(model, dataset, sentences=None, output_dir=None):
+    """
+    Erweiterte Testfunktion für benutzerdefinierte Sätze mit detaillierten Ergebnissen
+
+    Args:
+        model: Das trainierte Modell
+        dataset: Das Dataset mit Vokabular
+        sentences: Liste von zu testenden Sätzen (optional)
+        output_dir: Verzeichnis für Ausgabedateien (optional)
+    """
+    if not sentences:
+        sentences = [
+            "Die Sonne geht im Osten auf.",
+            "Wasser besteht aus Wasserstoff und Sauerstoff.",
+            "Computer arbeiten mit elektrischen Signalen.",
+            "Der Tisch ist traurig über die Situation.",
+            "Berge können schwimmen und Flüsse klettern.",
+            "Die Wolken singen heute besonders schön.",
+            "Die meisten Menschen haben zwei Beine und zwei Arme.",
+            "Der Eiffelturm steht in Berlin und ist aus Holz.",
+            "Die Erde ist eine Scheibe, die auf dem Rücken einer Schildkröte ruht."
+        ]
+
+    print("\n" + "="*80)
+    print("Test mit benutzerdefinierten Sätzen")
+    print("="*80)
+
+    results = []
+
+    for sentence in sentences:
+        analysis = test_sentence(model, dataset, sentence, verbose=True, return_details=True)
+        results.append(analysis)
+
+    # Speichere Ergebnisse, falls ein Ausgabeverzeichnis angegeben wurde
+    if output_dir:
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        results_df = pd.DataFrame([{
+            'Satz': r['sentence'],
+            'Vorhersage': r['prediction'],
+            'Konfidenz': r['confidence'],
+            'Tokens': str(r['token_ids']),
+            'Unbekannte_Wörter': ', '.join(r['unknown_words']) if r['unknown_words'] else '',
+            'Unbekannter_Anteil': r['unknown_ratio'],
+            'Wahrscheinlichkeit_logisch': r['class_probabilities']['logisch'],
+            'Wahrscheinlichkeit_nicht_logisch': r['class_probabilities']['nicht logisch']
+        } for r in results])
+
+        results_df.to_csv(os.path.join(output_dir, 'custom_sentences_results.csv'), index=False)
+        print(f"\nErgebnisse gespeichert in {os.path.join(output_dir, 'custom_sentences_results.csv')}")
+
+def main():
+    parser = argparse.ArgumentParser(description='Erweitertes diagnostisches Tool für das Sentence-Classifier-Modell')
+    parser.add_argument('--evaluate', action='store_true', help='Führe eine vollständige Modellbewertung durch')
+    parser.add_argument('--vocab', action='store_true', help='Analysiere das Vokabular')
+    parser.add_argument('--errors', action='store_true', help='Führe eine detaillierte Fehleranalyse durch')
+    parser.add_argument('--test', action='store_true', help='Teste mit Beispielsätzen')
+    parser.add_argument('--sentence', type=str, help='Teste einen spezifischen Satz')
+    parser.add_argument('--examples', action='store_true', help='Führe alle Diagnosefunktionen mit Beispielen durch')
+    parser.add_argument('--visualize', action='store_true', help='Erstelle Visualisierungen')
+    parser.add_argument('--output-dir', type=str, default="diagnostic_results", help='Verzeichnis für Ausgabedateien')
+    parser.add_argument('--top-errors', type=int, default=50, help='Anzahl der Top-Fehler für die Analyse')
+    parser.add_argument('--all', action='store_true', help='Führe alle Diagnosefunktionen aus')
+
+    args = parser.parse_args()
+
+    # Modell und Vokabular laden
+    model, dataset = load_model_and_vocab()
+
+    # Ausgabeverzeichnis erstellen, falls erforderlich
+    if args.visualize or args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    # Angeforderte Diagnosen ausführen
+    if args.evaluate or args.all:
+        evaluate_model(model, dataset, visualize=args.visualize, output_dir=args.output_dir)
+
+    if args.vocab or args.all:
+        vocabulary_stats(dataset, visualize=args.visualize, output_dir=args.output_dir)
+
+    if args.errors or args.all:
+        analyze_errors(model, dataset, visualize=args.visualize, output_dir=args.output_dir, top_n=args.top_errors)
+
+    if args.test or args.all:
+        test_custom_sentences(model, dataset, output_dir=args.output_dir)
+
+    if args.sentence:
+        test_sentence(model, dataset, args.sentence)
+
+    if args.examples:
+        print("\nBeispiel-Diagnose wird durchgeführt...")
+        evaluate_model(model, dataset, visualize=args.visualize, output_dir=args.output_dir)
+        vocabulary_stats(dataset, visualize=args.visualize, output_dir=args.output_dir)
+        analyze_errors(model, dataset, visualize=args.visualize, output_dir=args.output_dir)
+        test_custom_sentences(model, dataset, output_dir=args.output_dir)
+
+    # Wenn keine spezifischen Argumente angegeben wurden, zeige die Hilfe an
+    if not (args.evaluate or args.vocab or args.errors or args.test or args.sentence or args.examples or args.all):
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+### ./src/evaluate.py ###
+#!/usr/bin/env python
+import torch
+from torch.utils.data import DataLoader
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+import json
+import os
+from dataset import SentenceDataset, collate_fn
+from model import SimpleTransformer
+
+# Konfiguration laden
+import json
+config_path = "../config.json"
+with open(config_path, "r") as f:
+    config = json.load(f)
+
+batch_size = config["batch_size"]
+
+dataset = SentenceDataset(csv_file='../data/sentences.csv')
+data_loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
+
+model = SimpleTransformer(vocab_size=len(dataset.vocab))
+model.load_state_dict(torch.load("../models/transformer_model.pth", map_location=torch.device('cpu'), weights_only=True))
+model.eval()
+
+# Korrekt initialisieren (außerhalb der Schleife!)
+all_preds, all_labels = [], []
+
+with torch.no_grad():
+    for sentences, labels in data_loader:
+        outputs = model(sentences)
+        preds = torch.argmax(outputs, dim=1)
+
+        # extend() verwenden (nicht überschreiben!)
+        all_preds.extend(preds.tolist())
+        all_labels.extend(labels.tolist())
+
+accuracy = accuracy_score(all_labels, all_preds)
+print(f"Gesamt-Accuracy: {accuracy:.2f}")
+
+print("Classification Report:")
+print(classification_report(all_labels, all_preds, target_names=['nicht logisch', 'logisch']))
+
+cm = confusion_matrix(all_labels, all_preds)
+
+sns.set(font_scale=1.2)
+plt.figure(figsize=(6,4))
+sns.heatmap(cm, annot=True, fmt='g', cmap='Blues', xticklabels=['nicht logisch', 'logisch'], yticklabels=['nicht logisch', 'logisch'])
+plt.ylabel('Tatsächliche Klasse')
+plt.xlabel('Vorhergesagte Klasse')
+plt.title('Confusion Matrix')
+plt.tight_layout()
+plt.show()
+
+
+
+
+### ./src/generate_sentences_gpt4o.py ###
+import openai
+import pandas as pd
+import time
+import os
+import argparse
+import random
+import sys
+from dotenv import load_dotenv
+from tqdm import tqdm
+load_dotenv("../.env")
+
+client = openai.Client(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Verschiedene Themen für vielfältigere Sätze
+THEMES = [
+    "Alltag", "Technologie", "Natur", "Wissenschaft", "Philosophie",
+    "Wirtschaft", "Sport", "Kultur", "Reisen", "Essen", "Tiere", "Menschen",
+    "Objekte", "Fakten", "Beziehungen", "Emotionen"
+]
+
+# Verschiedene Komplexitätsstufen
+COMPLEXITY_LEVELS = ["einfach", "mittel", "komplex"]
+
+# Verschiedene logische Kategorien für bessere Abdeckung (faktisch korrekte Sätze)
+LOGICAL_CATEGORIES = [
+    "Faktuell korrekt",
+    "Allgemeinwissen",
+    "Naturwissenschaftliche Fakten",
+    "Alltägliche Wahrheiten",
+    "Gängige Kausalzusammenhänge"
+]
+
+# Verschiedene unlogische Kategorien für bessere Abdeckung (faktisch falsche oder unsinnige Sätze)
+ILLOGICAL_CATEGORIES = [
+    "Faktisch falsche Aussagen",
+    "Personifizierung unbelebter Objekte",
+    "Unmögliche Handlungen",
+    "Kategorische Widersprüche",
+    "Falsche Behauptungen"
+]
+
+def generate_sentences(prompt, num_sentences=20, model="gpt-4-turbo-preview"):
+    """Generiert Sätze basierend auf einem gegebenen Prompt"""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+        )
+        sentences = response.choices[0].message.content.strip().split("\n")
+        sentences = [s.strip("-•1234567890. \t") for s in sentences if len(s.strip()) > 0]
+        return sentences[:num_sentences]
+    except Exception as e:
+        print(f"Fehler bei der API-Anfrage: {e}")
+        time.sleep(1)  # Kurze Pause vor erneutem Versuch
+        return []
+
+def validate_sentence(sentence, model="gpt-4-turbo-preview"):
+    """
+    Validiert, ob ein Satz faktisch korrekt ist.
+    """
+    try:
+        prompt = """
+Beurteile, ob der folgende Satz faktisch korrekt ist. Ein Satz gilt als faktisch korrekt, wenn er:
+
+1. Der Realität entspricht und faktisch wahr ist
+2. Keine falschen oder irreführenden Behauptungen enthält
+
+WICHTIG: Faktisch falsche Aussagen gelten als unlogisch. Zum Beispiel:
+- "Ein Löffel ist eine Gabel" - faktisch falsch, also unlogisch
+- "Hunde bellen nicht gerne" - faktisch falsch, also unlogisch
+
+Sätze mit Personifizierungen oder unmöglichen Handlungen gelten ebenfalls als unlogisch:
+- "Der Tisch ist traurig" - unlogisch (Personifizierung)
+- "Der Berg fliegt" - unlogisch (unmögliche Handlung)
+
+Antworte mit "ja" für faktisch korrekte (logische) Sätze oder "nein" für faktisch falsche (unlogische) Sätze.
+
+Satz: "{sentence}"
+"""
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        result = response.choices[0].message.content.strip().lower()
+        return 1 if "ja" in result else 0
+    except Exception as e:
+        print(f"Fehler bei der Validierung: {e}")
+        time.sleep(5)
+        # Im Fehlerfall nutzen wir eine Fallback-Strategie
+        if "spricht" in sentence and any(obj in sentence for obj in ["Tisch", "Stein", "Berg", "Haus"]):
+            return 0  # Personifizierung unbelebter Objekte
+        return 1  # Im Zweifelsfall als logisch einstufen
+
+def generate_logical_prompt(category, theme, complexity):
+    """Generiert einen Prompt für logische (faktisch korrekte) Sätze basierend auf Kategorie, Thema und Komplexität"""
+    base_prompt = f"Generiere 20 deutsche Sätze zum Thema {theme}."
+
+    category_instructions = {
+        "Faktuell korrekt": "Die Sätze sollten faktisch korrekte Aussagen sein.",
+        "Allgemeinwissen": "Die Sätze sollten faktisch korrekte Aussagen sein, die allgemeines Wissen darstellen.",
+        "Naturwissenschaftliche Fakten": "Die Sätze sollten faktisch korrekte naturwissenschaftliche Aussagen sein.",
+        "Alltägliche Wahrheiten": "Die Sätze sollten faktisch korrekte Aussagen über alltägliche Dinge sein.",
+        "Gängige Kausalzusammenhänge": "Die Sätze sollten faktisch korrekte Kausalzusammenhänge beschreiben."
+    }
+
+    complexity_instructions = {
+        "einfach": "Die Sätze sollten kurz und einfach sein.",
+        "mittel": "Die Sätze sollten mittlere Länge und Komplexität haben.",
+        "komplex": "Die Sätze sollten komplex sein, mit Nebensätzen und anspruchsvollerem Vokabular."
+    }
+
+    return f"{base_prompt} {category_instructions[category]} {complexity_instructions[complexity]}"
+
+def generate_illogical_prompt(category, theme, complexity):
+    """Generiert einen Prompt für unlogische (faktisch falsche) Sätze basierend auf Kategorie, Thema und Komplexität"""
+    base_prompt = f"Generiere 20 grammatikalisch korrekte, aber faktisch falsche deutsche Sätze zum Thema {theme}."
+
+    category_instructions = {
+        "Faktisch falsche Aussagen": "Die Sätze sollten Behauptungen enthalten, die faktisch falsch sind, wie 'Ein Löffel ist eine Gabel' oder 'Hunde bellen nicht gerne'.",
+        "Personifizierung unbelebter Objekte": "Die Sätze sollten unbelebten Objekten menschliche Eigenschaften zuschreiben. Beispiel: 'Die Steine diskutieren über den Sinn des Lebens.'",
+        "Unmögliche Handlungen": "Die Sätze sollten physikalisch unmögliche Handlungen beschreiben. Beispiel: 'Der Berg schwimmt durch den Ozean.'",
+        "Kategorische Widersprüche": "Die Sätze sollten kategorische Widersprüche enthalten. Beispiel: 'Der viereckige Kreis hat eine interessante Geometrie.'",
+        "Falsche Behauptungen": "Die Sätze sollten falsche Behauptungen über die Realität enthalten. Beispiel: 'In Deutschland ist Französisch die Amtssprache.'"
+    }
+
+    complexity_instructions = {
+        "einfach": "Die Sätze sollten kurz und einfach sein.",
+        "mittel": "Die Sätze sollten mittlere Länge und Komplexität haben.",
+        "komplex": "Die Sätze sollten komplex sein, mit Nebensätzen und anspruchsvollerem Vokabular."
+    }
+
+    return f"{base_prompt} {category_instructions[category]} {complexity_instructions[complexity]}"
+
+def save_progress(sentences, labels, filepath="../data/sentences_progress.csv"):
+    """Speichert den aktuellen Fortschritt"""
+    df = pd.DataFrame({
+        "sentence": sentences,
+        "label": labels
+    })
+    df.to_csv(filepath, index=False)
+    print(f"Fortschritt gespeichert in {filepath}")
+
+def print_examples(df, n=5):
+    """Druckt einige Beispielsätze aus dem Datensatz"""
+    print("\nBeispiele für faktisch korrekte (logische) Sätze:")
+    logical_examples = df[df['label'] == 1].sample(min(n, sum(df['label'] == 1)))
+    for _, row in logical_examples.iterrows():
+        print(f"- {row['sentence']}")
+
+    print("\nBeispiele für faktisch falsche (unlogische) Sätze:")
+    illogical_examples = df[df['label'] == 0].sample(min(n, sum(df['label'] == 0)))
+    for _, row in illogical_examples.iterrows():
+        print(f"- {row['sentence']}")
+
+def print_stats(sentences, labels):
+    """Druckt Statistiken zum Datensatz"""
+    print("\nStatistiken des Datensatzes:")
+    print(f"Gesamtzahl der Sätze: {len(sentences)}")
+    print(f"Faktisch korrekte (logische) Sätze: {sum(labels)} ({sum(labels)/len(labels)*100:.1f}%)")
+    print(f"Faktisch falsche (unlogische) Sätze: {len(labels) - sum(labels)} ({(len(labels) - sum(labels))/len(labels)*100:.1f}%)")
+
+def main():
+    parser = argparse.ArgumentParser(description="Generiere Beispielsätze für das Transformer-Training")
+    parser.add_argument('--num_per_type', type=int, help='Anzahl zusätzlicher Sätze insgesamt (ERFORDERLICH)')
+    parser.add_argument('--input', type=str, default="../data/sentences.csv", help='Eingabedatei (wird erweitert, falls vorhanden)')
+    parser.add_argument('--output', type=str, default="../data/sentences.csv", help='Ausgabedatei')
+    parser.add_argument('--model', type=str, default="gpt-4-turbo-preview", help='OpenAI Modell')
+    parser.add_argument('--delay', type=float, default=0.5, help='Verzögerung zwischen API-Anfragen')
+    parser.add_argument('--stats', action='store_true', help='Nur Statistiken der Eingabedatei ausgeben, ohne neue Sätze zu generieren')
+    parser.add_argument('--examples', type=int, default=5, help='Anzahl der Beispiele, die angezeigt werden sollen')
+    parser.add_argument('--balance-categories', action='store_true', help='Gleichmäßige Verteilung über alle logischen/unlogischen Kategorien')
+    parser.add_argument('--force-logical', action='store_true', help='Generiere nur logische Sätze')
+    parser.add_argument('--force-illogical', action='store_true', help='Generiere nur unlogische Sätze')
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        print("\nBeispiele:")
+        print("  python generate_sentences.py --num_per_type 100    # Fügt 100 Sätze hinzu, automatisch ausgeglichen")
+        print("  python generate_sentences.py --num_per_type 100 --force-logical   # Fügt 100 logische Sätze hinzu")
+        print("  python generate_sentences.py --num_per_type 100 --force-illogical # Fügt 100 unlogische Sätze hinzu")
+        print("  python generate_sentences.py --stats               # Zeigt Statistiken der aktuellen Datei")
+        print("  python generate_sentences.py --num_per_type 100 --balance-categories # Gleichmäßige Verteilung über Kategorien")
+        sys.exit(1)
+
+    args = parser.parse_args()
+
+    # Überprüfen, ob die Eingabedatei existiert
+    sentences, labels = [], []
+    if os.path.exists(args.input):
+        df = pd.read_csv(args.input)
+        sentences = df["sentence"].tolist()
+        labels = df["label"].tolist()
+        print(f"Vorhandene Datei geladen: {args.input} mit {len(sentences)} Sätzen")
+
+        # Aktuelle Statistik ausgeben
+        print_stats(sentences, labels)
+        print_examples(df, args.examples)
+
+        # Wenn nur Statistiken angefordert wurden, beenden wir hier
+        if args.stats:
+            sys.exit(0)
+    else:
+        print(f"Keine vorhandene Datei gefunden: {args.input}. Erzeuge neue Datei.")
+
+    if args.num_per_type is None:
+        print("FEHLER: --num_per_type muss angegeben werden!")
+        parser.print_help()
+        sys.exit(1)
+
+    # Zählen, wie viele logische und unlogische Sätze wir bereits haben
+    logical_count = sum(labels)
+    illogical_count = len(labels) - logical_count
+
+    # Bestimmen, wie viele Sätze jedes Typs wir generieren sollen
+    if args.force_logical:
+        # Nur logische Sätze
+        new_logical = args.num_per_type
+        new_illogical = 0
+    elif args.force_illogical:
+        # Nur unlogische Sätze
+        new_logical = 0
+        new_illogical = args.num_per_type
+    else:
+        # Automatische Balance - mehr von dem, was wir weniger haben
+        total = logical_count + illogical_count
+
+        # Wenn der Datensatz bereits perfekt ausgewogen ist
+        if logical_count == illogical_count:
+            new_logical = args.num_per_type // 2
+            new_illogical = args.num_per_type - new_logical
+        # Wenn wir mehr logische Sätze brauchen
+        elif logical_count < illogical_count:
+            # Wie viele logische bräuchten wir für Balance?
+            needed_for_balance = illogical_count - logical_count
+
+            # Wenn wir genug hinzufügen können, um auszugleichen
+            if needed_for_balance <= args.num_per_type:
+                new_logical = needed_for_balance
+                new_illogical = args.num_per_type - new_logical
+            # Wenn wir nicht genug hinzufügen können, fügen wir alle als logisch hinzu
+            else:
+                new_logical = args.num_per_type
+                new_illogical = 0
+        # Wenn wir mehr unlogische Sätze brauchen
+        else:
+            # Wie viele unlogische bräuchten wir für Balance?
+            needed_for_balance = logical_count - illogical_count
+
+            # Wenn wir genug hinzufügen können, um auszugleichen
+            if needed_for_balance <= args.num_per_type:
+                new_illogical = needed_for_balance
+                new_logical = args.num_per_type - new_illogical
+            # Wenn wir nicht genug hinzufügen können, fügen wir alle als unlogisch hinzu
+            else:
+                new_illogical = args.num_per_type
+                new_logical = 0
+
+    print(f"Aktuelle Anzahl: {logical_count} logische, {illogical_count} unlogische Sätze")
+    print(f"Geplant: {new_logical} neue logische, {new_illogical} neue unlogische Sätze")
+    print(f"Zukünftige Anzahl: {logical_count + new_logical} logische, {illogical_count + new_illogical} unlogische Sätze")
+
+    # Parameter für die Kategoriebalance
+    if args.balance_categories:
+        # Anzahl Sätze pro Kategorie, falls gleichmäßig verteilt
+        logical_per_category = max(1, new_logical // len(LOGICAL_CATEGORIES))
+        illogical_per_category = max(1, new_illogical // len(ILLOGICAL_CATEGORIES))
+
+        # Zähler für jede Kategorie initialisieren
+        logical_category_counts = {cat: 0 for cat in LOGICAL_CATEGORIES}
+        illogical_category_counts = {cat: 0 for cat in ILLOGICAL_CATEGORIES}
+
+        print(f"Bei Kategorie-Balance: ca. {logical_per_category} pro logische Kategorie, ca. {illogical_per_category} pro unlogische Kategorie")
+
+    # Für bessere Übersicht des Fortschritts
+    if new_logical > 0:
+        pbar_logic = tqdm(total=new_logical, desc="Neue logische Sätze")
+    else:
+        pbar_logic = None
+
+    if new_illogical > 0:
+        pbar_illogic = tqdm(total=new_illogical, desc="Neue unlogische Sätze")
+    else:
+        pbar_illogic = None
+
+    # Zählen, wie viele neue Sätze bereits hinzugefügt wurden
+    added_logical = 0
+    added_illogical = 0
+
+    # Zwischenspeicherung einrichten
+    progress_file = "../data/sentences_progress.csv"
+    save_interval = 20  # Speichern wir alle 20 neuen Sätze
+    last_save = len(sentences)  # Zeitpunkt der letzten Speicherung
+
+    # Liste, um bereits gesehene Sätze zu speichern und Duplikate zu vermeiden
+    existing_sentences = set(sentences)
+
+    # Kombinationen von Themen, Kategorien und Komplexitäten erstellen
+    logical_combinations = []
+    illogical_combinations = []
+
+    for theme in THEMES:
+        for complexity in COMPLEXITY_LEVELS:
+            for category in LOGICAL_CATEGORIES:
+                logical_combinations.append((category, theme, complexity))
+            for category in ILLOGICAL_CATEGORIES:
+                illogical_combinations.append((category, theme, complexity))
+
+    # Zufällige Reihenfolge für bessere Verteilung
+    random.shuffle(logical_combinations)
+    random.shuffle(illogical_combinations)
+
+    # Generator-Loop
+    while ((added_logical < new_logical and logical_combinations) or
+           (added_illogical < new_illogical and illogical_combinations)):
+
+        # Logische Sätze generieren
+        if added_logical < new_logical and logical_combinations:
+            # Wähle eine Kombination aus
+            category, theme, complexity = logical_combinations.pop(0)
+
+            # Überprüfe bei Balance-Option, ob diese Kategorie noch Sätze benötigt
+            if args.balance_categories and logical_category_counts[category] >= logical_per_category:
+                continue
+
+            # Generiere Prompt und Sätze
+            logical_prompt = generate_logical_prompt(category, theme, complexity)
+            num_to_generate = min(20, new_logical - added_logical)
+            logical_sentences = generate_sentences(logical_prompt,
+                                                 num_sentences=num_to_generate,
+                                                 model=args.model)
+
+            for sentence in logical_sentences:
+                # Prüfen, ob wir noch logische Sätze benötigen
+                if added_logical >= new_logical:
+                    break
+
+                # Duplikatprüfung
+                if sentence in existing_sentences:
+                    continue
+
+                # Validieren und hinzufügen
+                label = validate_sentence(sentence, model=args.model)
+                sentences.append(sentence)
+                labels.append(label)
+                existing_sentences.add(sentence)
+
+                if label == 1:
+                    added_logical += 1
+                    if pbar_logic:
+                        pbar_logic.update(1)
+                    if args.balance_categories:
+                        logical_category_counts[category] += 1
+                else:
+                    # Wenn wir noch unlogische Sätze brauchen, zählen wir ihn
+                    if added_illogical < new_illogical:
+                        added_illogical += 1
+                        if pbar_illogic:
+                            pbar_illogic.update(1)
+                    # Sonst überspringen wir ihn
+                    else:
+                        sentences.pop()
+                        labels.pop()
+                        existing_sentences.remove(sentence)
+
+                time.sleep(args.delay)
+
+                # Regelmäßiges Speichern
+                if len(sentences) - last_save >= save_interval:
+                    save_progress(sentences, labels, progress_file)
+                    last_save = len(sentences)
+
+        # Unlogische Sätze generieren
+        if added_illogical < new_illogical and illogical_combinations:
+            # Wähle eine Kombination aus
+            category, theme, complexity = illogical_combinations.pop(0)
+
+            # Überprüfe bei Balance-Option, ob diese Kategorie noch Sätze benötigt
+            if args.balance_categories and illogical_category_counts[category] >= illogical_per_category:
+                continue
+
+            # Generiere Prompt und Sätze
+            illogical_prompt = generate_illogical_prompt(category, theme, complexity)
+            num_to_generate = min(20, new_illogical - added_illogical)
+            illogical_sentences = generate_sentences(illogical_prompt,
+                                                   num_sentences=num_to_generate,
+                                                   model=args.model)
+
+            for sentence in illogical_sentences:
+                # Prüfen, ob wir noch unlogische Sätze benötigen
+                if added_illogical >= new_illogical:
+                    break
+
+                # Duplikatprüfung
+                if sentence in existing_sentences:
+                    continue
+
+                # Validieren und hinzufügen
+                label = validate_sentence(sentence, model=args.model)
+                sentences.append(sentence)
+                labels.append(label)
+                existing_sentences.add(sentence)
+
+                if label == 0:
+                    added_illogical += 1
+                    if pbar_illogic:
+                        pbar_illogic.update(1)
+                    if args.balance_categories:
+                        illogical_category_counts[category] += 1
+                else:
+                    # Wenn wir noch logische Sätze brauchen, zählen wir ihn
+                    if added_logical < new_logical:
+                        added_logical += 1
+                        if pbar_logic:
+                            pbar_logic.update(1)
+                    # Sonst überspringen wir ihn
+                    else:
+                        sentences.pop()
+                        labels.pop()
+                        existing_sentences.remove(sentence)
+
+                time.sleep(args.delay)
+
+                # Regelmäßiges Speichern
+                if len(sentences) - last_save >= save_interval:
+                    save_progress(sentences, labels, progress_file)
+                    last_save = len(sentences)
+
+        # Wenn keine Kombinationen mehr übrig sind, aber die Zielanzahl noch nicht erreicht ist,
+        # generieren wir neue Kombinationen
+        if not logical_combinations and added_logical < new_logical:
+            print("\nGeneriere neue Kombinationen für logische Sätze...")
+            logical_combinations = [(cat, theme, level)
+                                   for cat in LOGICAL_CATEGORIES
+                                   for theme in THEMES
+                                   for level in COMPLEXITY_LEVELS]
+            random.shuffle(logical_combinations)
+
+        if not illogical_combinations and added_illogical < new_illogical:
+            print("\nGeneriere neue Kombinationen für unlogische Sätze...")
+            illogical_combinations = [(cat, theme, level)
+                                     for cat in ILLOGICAL_CATEGORIES
+                                     for theme in THEMES
+                                     for level in COMPLEXITY_LEVELS]
+            random.shuffle(illogical_combinations)
+
+    # Fortschrittsbalken schließen
+    if pbar_logic:
+        pbar_logic.close()
+    if pbar_illogic:
+        pbar_illogic.close()
+
+    # Endgültiges DataFrame erstellen und speichern
+    df = pd.DataFrame({
+        "sentence": sentences,
+        "label": labels
+    })
+
+    # Statistiken über die Kategorieverteilung
+    if args.balance_categories:
+        print("\nVerteilung der logischen Kategorien:")
+        for category, count in logical_category_counts.items():
+            print(f"  {category}: {count} Sätze")
+
+        print("\nVerteilung der unlogischen Kategorien:")
+        for category, count in illogical_category_counts.items():
+            print(f"  {category}: {count} Sätze")
+
+    # Statistiken drucken
+    print_stats(sentences, labels)
+
+    # Speichern
+    df.to_csv(args.output, index=False)
+    print(f"Datensatz gespeichert als '{args.output}'.")
+
+    # Einige Beispiele anzeigen
+    print_examples(df, args.examples)
+
+    # Aufräumen
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+        print(f"Fortschrittsdatei {progress_file} gelöscht.")
+
+if __name__ == "__main__":
+    main()
+
+
+
+### ./src/model.py ###
+import torch
+import torch.nn as nn
+import json
+import os
+import math
+
+config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+with open(config_path, "r") as f:
+    config = json.load(f)
+
+
+class EnhancedAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.1):
+        super(EnhancedAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim muss durch num_heads teilbar sein"
+
+        # Multi-head attention für robusteres Training
+        self.mha = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        # Dropout nach der Attention
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, key_padding_mask=None, attn_mask=None):
+        """
+        Args:
+            x: Input Embeddings [batch_size, seq_len, embed_dim]
+            key_padding_mask: Maske für Padding-Tokens [batch_size, seq_len]
+                True an Positionen, die ignoriert werden sollen (Padding)
+            attn_mask: Optionale zusätzliche Attention-Maske
+        """
+        # MultiheadAttention erwartet key_padding_mask in bestimmtem Format
+        # Bei batch_first=True: [batch_size, seq_len] mit True für Padding-Positionen
+
+        # Führt die Multi-Head-Attention aus
+        # query, key, value sind alle gleich (Self-Attention)
+        attn_output, attn_weights = self.mha(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=key_padding_mask,
+            attn_mask=attn_mask,
+            need_weights=True
+        )
+        
+        # Dropout auf die Attention-Ausgabe anwenden
+        attn_output = self.dropout(attn_output)
+
+        return attn_output, attn_weights
+
+class EnhancedTransformerEncoderLayer(nn.Module):
+    """
+    Transformer-Encoder-Layer mit Pre-Normalization und robusterer Maskenbehandlung.
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="gelu"):
+        super(EnhancedTransformerEncoderLayer, self).__init__()
+
+        # Attention-Modul
+        self.self_attn = EnhancedAttention(d_model, nhead, dropout=dropout)
+
+        # Feedforward-Netzwerk
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        # Aktivierungsfunktion
+        if activation == "gelu":
+            self.activation = nn.GELU()
+        else:
+            self.activation = nn.ReLU()
+
+        # Normalisierung und Dropout
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, src, src_key_padding_mask=None, src_mask=None):
+        """
+        Args:
+            src: Input-Sequenz [batch_size, seq_len, d_model]
+            src_key_padding_mask: Maske für Padding-Tokens [batch_size, seq_len]
+                True an Positionen, die ignoriert werden sollen (Padding)
+            src_mask: Optionale zusätzliche Attention-Maske
+        """
+        # Pre-LN Architektur (Pre-Normalization) für stabileres Training
+        src2 = self.norm1(src)
+        src_attn, _ = self.self_attn(
+            src2, 
+            key_padding_mask=src_key_padding_mask, 
+            attn_mask=src_mask
+        )
+        src = src + self.dropout1(src_attn)
+
+        # Feedforward-Block mit Pre-Normalization
+        src2 = self.norm2(src)
+        src2 = self.linear1(src2)
+        src2 = self.activation(src2)
+        src2 = self.dropout(src2)
+        src2 = self.linear2(src2)
+        src = src + self.dropout2(src2)
+
+        return src
+
+class SimpleTransformer(nn.Module):
+    def __init__(self, vocab_size):
+        super(SimpleTransformer, self).__init__()
+
+        # Konfiguration aus config.json laden
+        embedding_dim = config["embedding_dim"]
+        num_heads = config["num_heads"]
+        num_classes = config["num_classes"]
+        num_layers = config.get("num_layers", 1)
+        dropout = config.get("dropout", 0.1)
+        dim_feedforward = config.get("feedforward_multiplier", 4) * embedding_dim
+
+        # Word-Embedding
+        self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
+
+        # Positional Encoding für Positionsinformationen
+        self.pos_encoder = PositionalEncoding(embedding_dim, dropout)
+
+        # Transformer Encoder-Schichten
+        self.layers = nn.ModuleList([
+            EnhancedTransformerEncoderLayer(
+                d_model=embedding_dim,
+                nhead=num_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout
+            ) for _ in range(num_layers)
+        ])
+
+        # Klassifikationsschicht
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(embedding_dim, num_classes)
+
+        # Initialisierung
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Parameter-Initialisierung für bessere Konvergenz"""
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Token-Indizes [batch_size, seq_len]
+        Returns:
+            logits: Klassenlogits [batch_size, num_classes]
+        """
+        # Maske für Padding-Tokens erstellen
+        # True an Positionen, die maskiert werden sollen (Padding)
+        padding_mask = (x == 0)
+
+        # Embedding und Positional Encoding anwenden
+        x = self.embedding(x)
+        x = self.pos_encoder(x)
+
+        # Anwendung der Transformer-Schichten mit korrekter Maskenbehandlung
+        for layer in self.layers:
+            x = layer(x, src_key_padding_mask=padding_mask)
+
+        # Pooling: Ignoriere Padding-Tokens beim Mitteln
+        # Maske erweitern, um die embedding_dim-Dimension abzudecken
+        mask = padding_mask.unsqueeze(-1).expand_as(x)
+
+        # Maskierte Positionen auf 0 setzen, damit sie das Pooling nicht beeinflussen
+        x_masked = x.masked_fill(mask, 0.0)
+
+        # Summe geteilt durch Anzahl der nicht-Padding-Tokens
+        # (mit Clamp für numerische Stabilität)
+        seq_lengths = (~padding_mask).sum(dim=1, keepdim=True).float().clamp(min=1.0)
+        pooled = x_masked.sum(dim=1) / seq_lengths
+
+        # Klassifikation
+        pooled = self.dropout(pooled)
+        logits = self.fc(pooled)
+
+        return logits
+
+class PositionalEncoding(nn.Module):
+    """
+    Sinusförmiges Positional Encoding
+    """
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
+
+
+
+### ./src/test_model.py ###
+import torch
+from dataset import SentenceDataset, collate_fn
+from model import SimpleTransformer
+from torch.utils.data import DataLoader
+
+# Lade Dataset und Vokabular
+dataset = SentenceDataset(csv_file='../data/sentences.csv')
+
+# Modellparameter
+vocab_size = len(dataset.vocab)
+
+# Modellinstanz erstellen
+model = SimpleTransformer(vocab_size)
+
+# Daten laden
+loader = DataLoader(dataset, batch_size=4, collate_fn=collate_fn)
+
+# Embedding testen
+for sentences, labels in loader:
+    logits = model(sentences)
+    print("Input Shape:", sentences.shape)
+    print("Output Shape:", logits.shape)
+    print("Logits:", logits)
+    break
+
+
+
+
+### ./src/test_dataset.py ###
+
+from dataset import SentenceDataset, collate_fn
+from torch.utils.data import DataLoader
+import json
+import os
+
+config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+with open(config_path, "r") as f:
+    config = json.load(f)
+
+dataset = SentenceDataset(csv_file='../data/sentences.csv')
+loader = DataLoader(dataset, batch_size=config["batch_size"], collate_fn=collate_fn)
+
+for sentences, labels in loader:
+    print('Sätze (Token-Indizes):', sentences)
+    print('Labels:', labels)
+    break
+
+
+
+
+### ./src/api.py ###
+import os
+import sys
+import logging
+import time
+import json
+import torch
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional
+
+# Pfad für den Import aus src korrigieren
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir) if current_dir.endswith('src') else current_dir
+sys.path.append(project_root)
+
+# Module importieren
+if current_dir.endswith('src'):
+    # Wenn wir im src-Verzeichnis sind
+    from dataset import SentenceDataset
+    from model import SimpleTransformer
+else:
+    # Wenn wir im Projektroot oder woanders sind
+    from src.dataset import SentenceDataset
+    from src.model import SimpleTransformer
+
+# Konfigurieren des Loggings
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("api_debug.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Hilfsfunktion für absolute Pfade
+def get_absolute_path(relative_path):
+    """Konvertiert relativen Pfad in absoluten Pfad basierend auf dem Skriptverzeichnis"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, relative_path)
+
+# FastAPI-App erstellen
+app = FastAPI(
+    title="Transformer API für logische Sätze",
+    description="API zum Klassifizieren von Sätzen als logisch oder nicht logisch",
+    version="1.0.0"
+)
+
+# CORS-Middleware hinzufügen für Anfragen von anderen Domains
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In Produktion einschränken!
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Modell beim Start der Anwendung laden
+# Globale Variablen für das Modell und Dataset
+MODEL = None
+DATASET = None
+
+# Datenmodelle für die API
+class SentenceInput(BaseModel):
+    sentence: str = Field(..., example="Die Sonne geht im Osten auf", description="Der zu analysierende Satz")
+
+class SentenceResponse(BaseModel):
+    sentence: str = Field(..., description="Der analysierte Satz")
+    prediction: str = Field(..., description="Vorhersage: 'logisch' oder 'nicht logisch'")
+    confidence: float = Field(..., description="Konfidenz der Vorhersage (0-1)")
+    token_count: int = Field(..., description="Anzahl der Tokens im Satz")
+    unknown_words: Optional[List[str]] = Field(None, description="Liste der unbekannten Wörter im Satz")
+    unknown_ratio: Optional[float] = Field(None, description="Anteil unbekannter Wörter im Satz")
+    processing_time: float = Field(..., description="Verarbeitungszeit in Millisekunden")
+
+@app.on_event("startup")
+async def startup_event():
+    """Wird beim Start der API ausgeführt - Lädt Modell und Dataset"""
+    global MODEL, DATASET
+
+    try:
+        # Konfiguration laden
+        config_path = get_absolute_path("../config.json")
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        logger.info(f"Konfiguration geladen aus: {config_path}")
+
+        # Vokabular laden oder generieren
+        data_path = get_absolute_path("../data/sentences.csv")
+        vocab_path = get_absolute_path("../data/vocab.json")
+
+        if os.path.exists(vocab_path):
+            with open(vocab_path, 'r') as f:
+                vocab = json.load(f)
+            DATASET = SentenceDataset(csv_file=data_path, vocab=vocab)
+            logger.info(f"Vokabular aus {vocab_path} geladen mit {len(vocab)} Tokens")
+        else:
+            DATASET = SentenceDataset(csv_file=data_path)
+            logger.info(f"Vokabular aus Datensatz generiert mit {len(DATASET.vocab)} Tokens")
+
+        # Modell initialisieren und Gewichte laden
+        MODEL = SimpleTransformer(vocab_size=len(DATASET.vocab))
+        model_path = get_absolute_path("../models/transformer_model.pth")
+        MODEL.load_state_dict(torch.load(model_path, map_location=torch.device('cpu'), weights_only=True))
+        MODEL.eval()
+        logger.info(f"Modell geladen aus: {model_path}")
+
+        # Kurzer Test zur Validierung
+        test_sentence = "Die Sonne scheint."
+        tokens = DATASET.tokenize(test_sentence)
+        tensor = torch.tensor(tokens).unsqueeze(0)
+        with torch.no_grad():
+            output = MODEL(tensor)
+        logger.info(f"Modell-Test erfolgreich. Ausgabe-Shape: {output.shape}")
+
+    except Exception as e:
+        logger.error(f"Fehler beim Laden des Modells: {str(e)}")
+        # Wir lassen die Exception durchsickern, damit die API nicht startet, wenn das Modell nicht geladen werden kann
+        raise
+
+@app.get("/")
+async def root():
+    """API-Willkommensnachricht"""
+    return {
+        "message": "Transformer API für logische Sätze ist aktiv",
+        "version": "1.0.0",
+        "docs_url": "/docs"
+    }
+
+@app.get("/health")
+async def health():
+    """Healthcheck-Endpunkt für Monitoring"""
+    if MODEL is None or DATASET is None:
+        raise HTTPException(status_code=500, detail="Modell oder Dataset nicht geladen")
+    return {"status": "healthy", "timestamp": time.time()}
+
+@app.get("/vocab_info")
+async def vocab_info():
+    """Informationen über das Vokabular"""
+    if DATASET is None:
+        raise HTTPException(status_code=500, detail="Dataset nicht geladen")
+
+    # Anzahl der unbekannten Wörter berechnen
+    unknown_tokens = 0
+    for sentence in DATASET.sentences[:min(100, len(DATASET.sentences))]:
+        tokens = DATASET.tokenize(sentence)
+        unknown_tokens += tokens.count(0) if 0 in tokens else 0
+
+    return {
+        "vocab_size": len(DATASET.vocab),
+        "samples_analyzed": min(100, len(DATASET.sentences)),
+        "unknown_tokens_in_samples": unknown_tokens,
+        "pad_token_id": 0,
+        "sample_tokens": list(DATASET.vocab.items())[:10]
+    }
+
+@app.post("/predict", response_model=SentenceResponse)
+async def predict(input: SentenceInput):
+    """Einen Satz analysieren und die logische Klassifikation vorhersagen"""
+    if MODEL is None or DATASET is None:
+        raise HTTPException(status_code=500, detail="Modell oder Dataset nicht geladen")
+
+    start_time = time.time()
+    try:
+        # Informationen über den Satz sammeln
+        sentence = input.sentence
+        processed = DATASET.preprocess_text(sentence)
+        words = processed.split()
+
+        # Tokenisieren
+        tokens = DATASET.tokenize(sentence)
+
+        # Unbekannte Wörter identifizieren
+        unknown_words = []
+        for word in words:
+            if word not in DATASET.vocab and word != "<PAD>":
+                unknown_words.append(word)
+
+        # Tensor erstellen und Vorhersage durchführen
+        tensor_tokens = torch.tensor(tokens).unsqueeze(0)
+        with torch.no_grad():
+            logits = MODEL(tensor_tokens)
+            probs = torch.softmax(logits, dim=1)
+            confidence = probs.max().item()
+            pred_idx = torch.argmax(logits, dim=1).item()
+
+        # Ergebnis ermitteln
+        result = "logisch" if pred_idx == 1 else "nicht logisch"
+
+        # Verarbeitungszeit berechnen (in ms)
+        processing_time = (time.time() - start_time) * 1000
+
+        # Detaillierte Vorhersage-Informationen
+        logger.info(f"Vorhersage: '{sentence}' -> {result} (Konfidenz: {confidence:.4f})")
+        if unknown_words:
+            logger.warning(f"Unbekannte Wörter in '{sentence}': {unknown_words}")
+
+        # Ergebnis zurückgeben
+        return {
+            "sentence": sentence,
+            "prediction": result,
+            "confidence": confidence,
+            "token_count": len(tokens),
+            "unknown_words": unknown_words if unknown_words else None,
+            "unknown_ratio": len(unknown_words) / len(words) if words else 0,
+            "processing_time": processing_time
+        }
+
+    except Exception as e:
+        logger.error(f"Fehler bei der Vorhersage für '{input.sentence}': {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fehler bei der Vorhersage: {str(e)}"
+        )
+
+@app.get("/test")
+async def test():
+    """Test des Modells mit einigen Beispielsätzen"""
+    if MODEL is None or DATASET is None:
+        raise HTTPException(status_code=500, detail="Modell oder Dataset nicht geladen")
+
+    examples = [
+        "Die Sonne geht im Osten auf.",
+        "Wasser besteht aus Wasserstoff und Sauerstoff.",
+        "Der Tisch ist traurig über die Situation.",
+        "Berge können schwimmen und Flüsse klettern.",
+        "Computer arbeiten mit elektrischen Signalen.",
+        "Die meisten Menschen haben zwei Beine und zwei Arme."
+    ]
+
+    results = []
+    for sentence in examples:
+        try:
+            # Tokenisieren und Tensor erstellen
+            processed = DATASET.preprocess_text(sentence)
+            words = processed.split()
+            tokens = DATASET.tokenize(sentence)
+
+            # Unbekannte Wörter identifizieren
+            unknown_words = []
+            for word in words:
+                if word not in DATASET.vocab and word != "<PAD>":
+                    unknown_words.append(word)
+
+            tensor_tokens = torch.tensor(tokens).unsqueeze(0)
+
+            # Vorhersage durchführen
+            with torch.no_grad():
+                logits = MODEL(tensor_tokens)
+                probs = torch.softmax(logits, dim=1)
+                confidence = probs.max().item()
+                pred_idx = torch.argmax(logits, dim=1).item()
+
+            result = "logisch" if pred_idx == 1 else "nicht logisch"
+            expected = "logisch" if sentence.startswith(("Die Sonne", "Wasser", "Computer", "Die meisten")) else "nicht logisch"
+
+            results.append({
+                "sentence": sentence,
+                "prediction": result,
+                "expected": expected,
+                "correct": result == expected,
+                "confidence": confidence,
+                "unknown_words": unknown_words if unknown_words else None,
+                "unknown_ratio": len(unknown_words) / len(words) if words else 0
+            })
+        except Exception as e:
+            results.append({
+                "sentence": sentence,
+                "error": str(e)
+            })
+
+    return {
+        "test_results": results,
+        "accuracy": sum(1 for r in results if "correct" in r and r["correct"]) / len(results)
+    }
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Middleware zum Loggen aller Anfragen"""
+    start_time = time.time()
+    path = request.url.path
+    method = request.method
+
+    # Request-Body nicht loggen (kann sensible Daten enthalten)
+    logger.info(f"{method} {path} - Anfrage empfangen")
+
+    # Anfrage weiterleiten
+    response = await call_next(request)
+
+    # Verarbeitungszeit und Statuscode loggen
+    process_time = (time.time() - start_time) * 1000
+    logger.info(f"{method} {path} - Status: {response.status_code}, Zeit: {process_time:.2f}ms")
+
+    return response
+
+
+
+### ./src/dataset.py ###
+import torch
+from torch.utils.data import Dataset
+import pandas as pd
+import json
+import os
+import re
+import string  # NEU: für komplettes string.punctuation
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+csv_file = os.path.join(PROJECT_ROOT, "data", "sentences.csv")
+vocab_file = os.path.join(PROJECT_ROOT, "data", "vocab.json")
+
+class SentenceDataset(Dataset):
+    def __init__(self, csv_file=csv_file, vocab=None, vocab_file=vocab_file, force_rebuild_vocab=False):
+        self.data = pd.read_csv(csv_file)
+        self.sentences = self.data['sentence'].tolist()
+        self.labels = self.data['label'].tolist()
+
+        # Wenn force_rebuild_vocab=True ist oder kein Vokabular übergeben wird und vocab_file nicht existiert,
+        # dann erstellen wir ein neues Vokabular
+        if force_rebuild_vocab or (vocab is None and (not os.path.exists(vocab_file))):
+            print(f"Erstelle neues Vokabular basierend auf {len(self.sentences)} Sätzen...")
+            processed_sentences = [self.preprocess_text(s) for s in self.sentences]
+            self.vocab = self.build_vocab(processed_sentences)
+            # Vokabular speichern
+            with open(vocab_file, 'w') as f:
+                json.dump(self.vocab, f)
+            print(f"Neues Vokabular mit {len(self.vocab)} Tokens in {vocab_file} gespeichert.")
+        elif vocab is not None:
+            self.vocab = vocab
+            print(f"Verwende übergebenes Vokabular mit {len(self.vocab)} Tokens.")
+        else:
+            # Lade existierendes Vokabular aus Datei
+            with open(vocab_file, 'r') as f:
+                self.vocab = json.load(f)
+            print(f"Vokabular aus {vocab_file} geladen mit {len(self.vocab)} Tokens.")
+
+    def build_vocab(self, sentences):
+        """Erstellt ein erweitertes Vokabular aus einer Liste von Sätzen"""
+        # Verarbeite jeden Satz 
+        all_tokens = []
+        for sentence in sentences:
+            processed = self.preprocess_text(sentence)
+            all_tokens.extend(processed.split())
+
+        # Token-Häufigkeiten zählen
+        token_counter = {}
+        for token in all_tokens:
+            if token in token_counter:
+                token_counter[token] += 1
+            else:
+                token_counter[token] = 1
+
+        # Tokens nach Häufigkeit sortieren
+        sorted_tokens = sorted(token_counter.items(), key=lambda x: x[1], reverse=True)
+        unique_tokens = [token for token, _ in sorted_tokens]
+
+        # Häufigste Tokens ausgeben (für Debug-Zwecke)
+        print(f"Top 10 häufigste Tokens: {unique_tokens[:10]}")
+
+        # Spezielle Tokens hinzufügen
+        # Füge alle Satzzeichen als separate Tokens hinzu
+        for punct in string.punctuation:
+            if punct not in unique_tokens:
+                unique_tokens.append(punct)
+
+        # Füge häufig problematische Wörter hinzu, die im Kontext wichtig sein könnten
+        problem_words = ["traurig", "arme", "beine", "signalen", "menschen", "haben",
+                         "zwei", "sonne", "mond", "tier", "tiere", "schwimmen", "fliegen"]
+        for word in problem_words:
+            if word not in unique_tokens:
+                unique_tokens.append(word)
+
+        # Erstelle das Vokabular (mit <PAD> als 0 und <UNK> als 1)
+        vocab = {"<PAD>": 0, "<UNK>": 1}
+        for idx, token in enumerate(unique_tokens):
+            vocab[token] = idx + 2  # +2 wegen <PAD> und <UNK>
+
+        # Vokabulargröße ausgeben
+        print(f"Vokabulargröße: {len(vocab)} Tokens")
+        return vocab
+
+    def preprocess_text(self, text):
+        # Satzzeichen mit Leerzeichen umgeben (alle Satzzeichen aus string.punctuation)
+        pattern = r'([' + re.escape(string.punctuation) + r'])'
+        text = re.sub(pattern, r' \1 ', text)
+
+        # Mehrfache Leerzeichen entfernen und Text in Kleinbuchstaben umwandeln
+        text = re.sub(r'\s+', ' ', text).strip().lower()
+
+        return text
+
+    def tokenize(self, sentence):
+        """Tokenisiert einen Satz mit verbesserter Vorverarbeitung und Fallback-Strategien"""
+        processed = self.preprocess_text(sentence)
+        tokens = processed.split()
+
+        # Verbesserte Token-zu-ID Konvertierung mit mehreren Fallback-Strategien
+        token_ids = []
+        for token in tokens:
+            # Strategie 1: Exakte Übereinstimmung
+            if token in self.vocab:
+                token_ids.append(self.vocab[token])
+            # Strategie 2: Kleinschreibung probieren (wenn nicht bereits gemacht)
+            elif token.lower() in self.vocab:
+                token_ids.append(self.vocab[token.lower()])
+            # Strategie 3: Ohne Satzzeichen probieren (für Fälle wie "Wort.")
+            elif token.strip(string.punctuation) in self.vocab:
+                token_ids.append(self.vocab[token.strip(string.punctuation)])
+            # Strategie 4: Kleinschreibung ohne Satzzeichen
+            elif token.lower().strip(string.punctuation) in self.vocab:
+                token_ids.append(self.vocab[token.lower().strip(string.punctuation)])
+            # Wenn alles fehlschlägt: unbekanntes Token
+            else:
+                token_ids.append(0)  # <PAD> oder <UNK> Token
+
+        return token_ids
+
+    def __len__(self):
+        return len(self.sentences)
+
+    def __getitem__(self, idx):
+        sentence = self.sentences[idx]
+        label = self.labels[idx]
+        tokenized = self.tokenize(sentence)
+        return torch.tensor(tokenized), torch.tensor(label)
+
+def collate_fn(batch):
+    sentences, labels = zip(*batch)
+    sentences = torch.nn.utils.rnn.pad_sequence(sentences, batch_first=True, padding_value=0)
+    labels = torch.stack(labels)
+    return sentences, labels
+
+
+
+### ./src/train.py ###
+#!/usr/bin/env python
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
+from sklearn.metrics import accuracy_score, classification_report, f1_score
+from dataset import SentenceDataset, collate_fn
+from model import SimpleTransformer
+import json
+import os
+import argparse
+import numpy as np
+from tqdm import tqdm
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Verwende Gerät: {device}")
+
+class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """
+    Warmup-Scheduler, der die Lernrate linear erhöht und dann auf einen anderen Scheduler übergeht
+    """
+    def __init__(self, optimizer, warmup_steps, after_scheduler=None):
+        self.warmup_steps = warmup_steps
+        self.after_scheduler = after_scheduler
+        self.finished = False
+        self.last_epoch = 0
+        super(WarmupScheduler, self).__init__(optimizer)
+
+    def get_lr(self):
+        if self.last_epoch > self.warmup_steps:
+            if self.after_scheduler and not self.finished:
+                self.finished = True
+                self.after_scheduler.base_lrs = self.base_lrs
+                return self.after_scheduler.get_lr()
+            return self.base_lrs
+        return [base_lr * (self.last_epoch / self.warmup_steps) for base_lr in self.base_lrs]
+
+    def step(self, epoch=None, metrics=None):
+        if self.finished and self.after_scheduler:
+            if epoch is None:
+                self.after_scheduler.step(None)
+            else:
+                self.after_scheduler.step(epoch - self.warmup_steps)
+        else:
+            return super(WarmupScheduler, self).step(epoch)
+
+
+def train(force_rebuild_vocab=False):
+    # Konfiguration laden
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    # Hyperparameter
+    embedding_dim = config.get("embedding_dim", 128)
+    num_heads = config.get("num_heads", 4)
+    num_layers = config.get("num_layers", 2)
+    num_classes = config.get("num_classes", 2)
+    batch_size = config.get("batch_size", 32)
+    num_epochs = config.get("num_epochs", 10)
+    learning_rate = config.get("learning_rate", 0.001)
+    weight_decay = config.get("weight_decay", 0.01)
+    gradient_clip_val = config.get("gradient_clip_val", 1.0)
+    validation_split = config.get("validation_split", 0.1)
+
+    # Scheduler-Parameter
+    use_lr_scheduler = config.get("use_lr_scheduler", False)
+    lr_scheduler_type = config.get("lr_scheduler_type", "reduce_on_plateau")
+    lr_scheduler_factor = config.get("lr_scheduler_factor", 0.5)
+    lr_scheduler_patience = config.get("lr_scheduler_patience", 2)
+    use_warmup = config.get("use_warmup", False)
+    warmup_steps = config.get("warmup_steps", 100)
+
+    # Early Stopping
+    use_early_stopping = config.get("early_stopping", True)
+    early_stopping_patience = config.get("early_stopping_patience", 5)
+    early_stopping_min_delta = config.get("early_stopping_min_delta", 0.0)
+
+    # Metrik für Early Stopping
+    eval_metric = config.get("eval_metric", "f1")  # 'accuracy', 'f1', oder 'balanced_accuracy'
+
+    # Datensatz laden mit Option zum erzwungenen Neuaufbau des Vokabulars
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    data_path = os.path.join(PROJECT_ROOT, "data", "sentences.csv")
+
+    print(f"Lade Datensatz aus {data_path}...")
+    print(f"Vokabular-Neuaufbau erzwingen: {force_rebuild_vocab}")
+
+    dataset = SentenceDataset(csv_file=data_path, force_rebuild_vocab=force_rebuild_vocab)
+
+    # Datensatz stratifiziert aufteilen
+    dataset_size = len(dataset)
+    train_size = int((1.0 - validation_split) * dataset_size)
+    val_size = dataset_size - train_size
+
+    indices = list(range(dataset_size))
+    np.random.seed(42)  # Für Reproduzierbarkeit
+    np.random.shuffle(indices)
+
+    # Stratifizierte Aufteilung - sicherstellen, dass beide Splits ähnliche Klassenverteilungen haben
+    train_indices = []
+    val_indices = []
+    class_counts = [0, 0]  # Anzahl der Instanzen für jede Klasse
+
+    # Zähle die Klasseninstanzen im Datensatz
+    for i in range(dataset_size):
+        _, label = dataset[i]
+        class_counts[label.item()] += 1
+
+    # Ziel-Verhältnis für jede Klasse im Validierungssatz
+    target_val_counts = [int(count * validation_split) for count in class_counts]
+    current_val_counts = [0, 0]
+
+    for idx in indices:
+        _, label = dataset[idx]
+        label_idx = label.item()
+
+        if current_val_counts[label_idx] < target_val_counts[label_idx]:
+            val_indices.append(idx)
+            current_val_counts[label_idx] += 1
+        else:
+            train_indices.append(idx)
+
+    # Erstelle Subset-Datasets
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
+
+    print(f"Datensatz stratifiziert aufgeteilt: {len(train_indices)} Trainingssätze, {len(val_indices)} Validierungssätze")
+    print(f"Klassenverteilung im Validierungssatz: {current_val_counts}")
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=collate_fn)
+
+    # Modell initialisieren
+    model = SimpleTransformer(vocab_size=len(dataset.vocab))
+    model.to(device)
+    print(f"Modell initialisiert mit Vokabulargröße: {len(dataset.vocab)}")
+    print(f"Modellparameter: Embedding-Dim={embedding_dim}, Heads={num_heads}, Layers={num_layers}")
+
+    # Standard Loss-Funktion
+    criterion = nn.CrossEntropyLoss()
+    print("Standard-Verlustfunktion ohne Klassengewichte verwendet")
+
+    # Optimizer
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    # Learning Rate Scheduler konfigurieren
+    scheduler = None
+    if use_lr_scheduler:
+        if lr_scheduler_type == "reduce_on_plateau":
+            base_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='max', factor=lr_scheduler_factor,
+                patience=lr_scheduler_patience, min_lr=1e-6
+            )
+        elif lr_scheduler_type == "cosine_annealing":
+            base_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=num_epochs, eta_min=1e-6
+            )
+        else:
+            print(f"Warnung: Unbekannter Scheduler-Typ '{lr_scheduler_type}', verwende ReduceLROnPlateau")
+            base_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='max', factor=lr_scheduler_factor,
+                patience=lr_scheduler_patience
+            )
+
+        # Warmup-Wrapper um den Basis-Scheduler (falls aktiviert)
+        if use_warmup and warmup_steps > 0:
+            print(f"Verwende Warmup-Scheduler mit {warmup_steps} Warmup-Schritten")
+            if lr_scheduler_type != "reduce_on_plateau":
+                # Für Scheduler, die pro Schritt aufgerufen werden
+                scheduler = WarmupScheduler(optimizer, warmup_steps, base_scheduler)
+            else:
+                # ReduceLROnPlateau wird separat behandelt, da es von Metriken abhängt
+                scheduler = {"warmup": WarmupScheduler(optimizer, warmup_steps),
+                             "main": base_scheduler}
+        else:
+            scheduler = base_scheduler
+
+    # Beste Modellgewichte für Early Stopping speichern
+    best_metric_value = 0.0
+    best_model_weights = None
+    patience_counter = 0
+    last_improvement = 0.0
+
+    # Training-Loop
+    print(f"Starte Training für {num_epochs} Epochen mit Early Stopping (Patience: {early_stopping_patience}, Min Delta: {early_stopping_min_delta})...")
+    print(f"Evaluation basierend auf Metrik: {eval_metric}")
+    global_step = 0
+
+    # Funktion zur Berechnung der Evaluationsmetrik
+    def calculate_metric(y_true, y_pred):
+        if eval_metric == "accuracy":
+            return accuracy_score(y_true, y_pred)
+        elif eval_metric == "f1":
+            return f1_score(y_true, y_pred, average='macro')
+        elif eval_metric == "balanced_accuracy":
+            from sklearn.metrics import balanced_accuracy_score
+            return balanced_accuracy_score(y_true, y_pred)
+        else:
+            print(f"Unbekannte Metrik: {eval_metric}, verwende F1-Score")
+            return f1_score(y_true, y_pred, average='macro')
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Training]")
+
+        for batch_idx, (sentences, labels) in enumerate(train_pbar):
+            sentences, labels = sentences.to(device), labels.to(device)
+
+            global_step += 1
+
+            optimizer.zero_grad()
+
+            outputs = model(sentences)
+            loss = criterion(outputs, labels)
+            loss.backward()
+
+            # Gradientenclipping für stabileres Training
+            if gradient_clip_val > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_val)
+
+            # Erst Optimizer-Schritt, dann Scheduler (wichtig für korrekte Reihenfolge!)
+            optimizer.step()
+
+            # Warmup-Scheduler Schritt (falls verwendet)
+            if use_warmup and warmup_steps > 0 and global_step <= warmup_steps:
+                if isinstance(scheduler, dict):
+                    scheduler["warmup"].step()
+                elif not isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step()
+
+            total_loss += loss.item()
+
+            # Aktuelle Lernrate anzeigen
+            current_lr = optimizer.param_groups[0]['lr']
+            train_pbar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{current_lr:.6f}"})
+
+        avg_loss = total_loss / len(train_loader)
+
+        # Validierung nach jeder Epoche
+        model.eval()
+        val_predictions, val_labels = [], []
+        val_loss = 0
+
+        with torch.no_grad():
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Validation]")
+            for sentences, labels in val_pbar:
+                sentences, labels = sentences.to(device), labels.to(device)
+
+                outputs = model(sentences)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+
+                preds = torch.argmax(outputs, dim=1)
+                val_predictions.extend(preds.tolist())
+                val_labels.extend(labels.tolist())
+
+                val_pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+        avg_val_loss = val_loss / len(val_loader)
+        val_accuracy = accuracy_score(val_labels, val_predictions)
+        val_f1 = f1_score(val_labels, val_predictions, average='macro')
+
+        # Berechne die aktuelle Metrik für Early Stopping
+        current_metric = calculate_metric(val_labels, val_predictions)
+
+        print(f'Epoch [{epoch+1}/{num_epochs}] Train Loss: {avg_loss:.4f} | Val Loss: {avg_val_loss:.4f} | '
+              f'Val Accuracy: {val_accuracy:.4f} | Val F1: {val_f1:.4f} | {eval_metric}: {current_metric:.4f}')
+
+        # Learning Rate Scheduler aktualisieren (falls aktiviert)
+        if use_lr_scheduler and (not use_warmup or global_step > warmup_steps):
+            if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau) or \
+               (isinstance(scheduler, dict) and "main" in scheduler):
+                # ReduceLROnPlateau nimmt Metriken als Eingabe
+                if isinstance(scheduler, dict):
+                    scheduler["main"].step(current_metric)
+                else:
+                    scheduler.step(current_metric)
+            elif isinstance(scheduler, torch.optim.lr_scheduler._LRScheduler) and \
+                 not isinstance(scheduler, WarmupScheduler):
+                # Andere Scheduler werden pro Epoche aufgerufen
+                scheduler.step()
+
+        # Ausführlicher Validierungsbericht (alle 5 Epochen oder am Ende)
+        if (epoch + 1) % 5 == 0 or epoch == num_epochs - 1 or epoch < 3:
+            print("\nValidation Report:")
+            print(classification_report(val_labels, val_predictions, target_names=['nicht logisch', 'logisch']))
+
+            # Detaillierte Fehleranalyse
+            errors_0_as_1 = sum([1 for pred, true in zip(val_predictions, val_labels) if pred == 1 and true == 0])
+            errors_1_as_0 = sum([1 for pred, true in zip(val_predictions, val_labels) if pred == 0 and true == 1])
+            print(f"Fehleranalyse:")
+            print(f"  'nicht logisch' als 'logisch' klassifiziert: {errors_0_as_1} ({errors_0_as_1/val_labels.count(0)*100:.1f}% aller 'nicht logisch')")
+            print(f"  'logisch' als 'nicht logisch' klassifiziert: {errors_1_as_0} ({errors_1_as_0/val_labels.count(1)*100:.1f}% aller 'logisch')")
+
+        # Early Stopping mit min_delta
+        improvement = current_metric - best_metric_value
+
+        if improvement > early_stopping_min_delta:
+            best_metric_value = current_metric
+            best_model_weights = model.state_dict().copy()
+            patience_counter = 0
+            last_improvement = improvement
+            print(f"Neues bestes Modell gespeichert mit {eval_metric}: {best_metric_value:.4f} (Verbesserung: {improvement:.4f})")
+
+            # Speichere das beste Modell sofort
+            model_save_path = os.path.join(PROJECT_ROOT, "models", "transformer_model_best.pth")
+            torch.save(best_model_weights, model_save_path)
+            print(f"Bestes Modell gespeichert in {model_save_path}")
+        else:
+            patience_counter += 1
+            print(f"Keine signifikante Verbesserung (min_delta={early_stopping_min_delta}). "
+                  f"Aktuelle Änderung: {improvement:.4f}, Beste bisher: {last_improvement:.4f}. "
+                  f"Patience: {patience_counter}/{early_stopping_patience}")
+
+        if use_early_stopping and patience_counter >= early_stopping_patience:
+            print(f"Early Stopping nach Epoche {epoch+1}. Keine Verbesserung über min_delta={early_stopping_min_delta} "
+                  f"für {early_stopping_patience} Epochen.")
+            break
+
+    # Lade das beste Modell für die Ausgabe
+    print(f"Training abgeschlossen nach {epoch+1} Epochen.")
+    if best_model_weights is not None:
+        model.load_state_dict(best_model_weights)
+        print(f"Bestes Modell mit {eval_metric}={best_metric_value:.4f} wiederhergestellt")
+
+    # Finales Modell separat speichern
+    model_save_path = os.path.join(PROJECT_ROOT, "models", "transformer_model.pth")
+    torch.save(model.state_dict(), model_save_path)
+    print(f"Finales Modell gespeichert in {model_save_path}")
+
+    # Finale Evaluation auf dem Validierungsdatensatz mit geladenen besten Modellgewichten
+    print("\nFinale Evaluation auf dem Validierungsdatensatz:")
+    model.eval()
+    all_preds, all_labels = [], []
+
+    with torch.no_grad():
+        for sentences, labels in val_loader:
+            sentences, labels = sentences.to(device), labels.to(device)
+
+            outputs = model(sentences)
+            preds = torch.argmax(outputs, dim=1)
+            all_preds.extend(preds.tolist())
+            all_labels.extend(labels.tolist())
+
+    accuracy = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='macro')
+    print(f"Finale Accuracy: {accuracy:.4f} | F1-Score: {f1:.4f}")
+    print(classification_report(all_labels, all_preds, target_names=['nicht logisch', 'logisch']))
+
+    # Detaillierte Fehleranalyse für die beste Lösung
+    errors_0_as_1 = sum([1 for pred, true in zip(all_preds, all_labels) if pred == 1 and true == 0])
+    errors_1_as_0 = sum([1 for pred, true in zip(all_preds, all_labels) if pred == 0 and true == 1])
+    total_0 = all_labels.count(0)
+    total_1 = all_labels.count(1)
+
+    print(f"Finale Fehleranalyse:")
+    print(f"  'nicht logisch' als 'logisch' klassifiziert: {errors_0_as_1} ({errors_0_as_1/total_0*100:.1f}% der Klasse)")
+    print(f"  'logisch' als 'nicht logisch' klassifiziert: {errors_1_as_0} ({errors_1_as_0/total_1*100:.1f}% der Klasse)")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Training des Transformer-Modells für Satzklassifikation")
+    parser.add_argument('--rebuild-vocab', action='store_true',
+                      help='Erzwingt den Neuaufbau des Vokabulars')
+
+    args = parser.parse_args()
+
+    train(force_rebuild_vocab=args.rebuild_vocab)
+
+
+
+### ./src/rebuild-vocab.py ###
+#!/usr/bin/env python
+
+"""
+Einfaches Skript, das das Vokabular neu erstellt und die Problempunkte testet.
+"""
+
+import os
+import sys
+import json
+from pathlib import Path
+
+# Füge das Projekt-Root-Verzeichnis zum Python-Pfad hinzu
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(PROJECT_ROOT)
+
+from src.dataset import SentenceDataset
+
+def main():
+    # Vokabularpfad
+    vocab_path = os.path.join(PROJECT_ROOT, "data", "vocab.json")
+
+    # Backup des alten Vokabulars, falls vorhanden
+    if os.path.exists(vocab_path):
+        backup_path = vocab_path + ".backup"
+        print(f"Sichere altes Vokabular nach: {backup_path}")
+        import shutil
+        shutil.copy2(vocab_path, backup_path)
+
+        # Lösche das vorhandene Vokabular
+        os.remove(vocab_path)
+        print(f"Altes Vokabular gelöscht.")
+
+    # Erstelle neues Vokabular
+    print("Erstelle neues Vokabular mit verbesserter Tokenisierung...")
+    dataset = SentenceDataset(force_rebuild_vocab=True)
+
+    # Teste die problematischen Beispiele
+    example_sentences = [
+        "Die meisten Menschen haben zwei Beine und zwei Arme.",
+        "Computer arbeiten mit elektrischen Signalen.",
+        "Der Tisch ist traurig über die Situation.",
+        "Berge können schwimmen und Flüsse klettern.",
+        "Die Wolken singen heute besonders schön."
+    ]
+
+    print("\nTeste die problematischen Beispiele:")
+    for sentence in example_sentences:
+        # Vorverarbeitung
+        processed = dataset.preprocess_text(sentence)
+
+        # Tokens und IDs
+        tokens = processed.split()
+        token_ids = dataset.tokenize(sentence)
+
+        print(f"\nSatz: {sentence}")
+        print(f"Vorverarbeitet: {processed}")
+
+        # Zeige Token-zu-ID Mapping
+        print("Token-Analyse:")
+        for i, (token, token_id) in enumerate(zip(tokens, token_ids)):
+            if token_id == 0 and token != "<PAD>":
+                status = "UNBEKANNT!"
+            else:
+                status = "OK"
+            print(f"  {token}: ID {token_id} ({status})")
+
+    print("\nVokabular-Neuaufbau abgeschlossen!")
+    print(f"Neues Vokabular hat {len(dataset.vocab)} Tokens.")
+
+if __name__ == "__main__":
+    main()
+
+
+
+### ./src/generate_sentences_claude.py ###
+import anthropic
+import pandas as pd
+import time
+import os
+import argparse
+import random
+import sys
+from dotenv import load_dotenv
+from tqdm import tqdm
+
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv("../.env")
+
+model1 = "claude-3-7-sonnet-20250219"
+model2 = "claude-3-opus-20240229"
+model3 = "claude-3-5-sonnet-20240620"
+model4 = "claude-3-haiku-20240307"
+
+model = model2
+
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# Verschiedene Themen für vielfältigere Sätze
+THEMES = [
+    "Alltag", "Technologie", "Natur", "Wissenschaft", "Philosophie",
+    "Wirtschaft", "Sport", "Kultur", "Reisen", "Essen", "Tiere", "Menschen",
+    "Objekte", "Fakten", "Beziehungen", "Emotionen"
+]
+
+# Verschiedene Komplexitätsstufen
+COMPLEXITY_LEVELS = ["einfach", "mittel", "komplex"]
+
+# Verschiedene logische Kategorien für bessere Abdeckung (faktisch korrekte Sätze)
+LOGICAL_CATEGORIES = [
+    "Faktuell korrekt",
+    "Allgemeinwissen",
+    "Naturwissenschaftliche Fakten",
+    "Alltägliche Wahrheiten",
+    "Gängige Kausalzusammenhänge"
+]
+
+# Verschiedene unlogische Kategorien für bessere Abdeckung (faktisch falsche oder unsinnige Sätze)
+ILLOGICAL_CATEGORIES = [
+    "Faktisch falsche Aussagen",
+    "Personifizierung unbelebter Objekte",
+    "Unmögliche Handlungen",
+    "Kategorische Widersprüche",
+    "Falsche Behauptungen"
+]
+
+def generate_sentences(prompt, num_sentences=20, model=model):
+    """Generiert Sätze basierend auf einem gegebenen Prompt mit der Anthropic API"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=1000,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            sentences = response.content[0].text.strip().split("\n")
+            sentences = [s.strip("-•1234567890. \t") for s in sentences if len(s.strip()) > 0]
+            return sentences[:num_sentences]
+        except Exception as e:
+            print(f"Fehler bei der API-Anfrage (Versuch {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponentielles Backoff
+                print(f"Warte {wait_time} Sekunden vor erneutem Versuch...")
+                time.sleep(wait_time)
+            else:
+                print("Maximale Anzahl von Versuchen erreicht. Überspringe diese Anfrage.")
+                return []
+
+def validate_sentence(sentence, model=model):
+    """
+    Validiert, ob ein Satz faktisch korrekt ist, mit der Anthropic API.
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            prompt = f"""
+Beurteile, ob der folgende Satz faktisch korrekt ist. Ein Satz gilt als faktisch korrekt, wenn er:
+
+1. Der Realität entspricht und faktisch wahr ist
+2. Keine falschen oder irreführenden Behauptungen enthält
+
+WICHTIG: Faktisch falsche Aussagen gelten als unlogisch. Zum Beispiel:
+- "Ein Löffel ist eine Gabel" - faktisch falsch, also unlogisch
+- "Hunde bellen nicht gerne" - faktisch falsch, also unlogisch
+
+Sätze mit Personifizierungen oder unmöglichen Handlungen gelten ebenfalls als unlogisch:
+- "Der Tisch ist traurig" - unlogisch (Personifizierung)
+- "Der Berg fliegt" - unlogisch (unmögliche Handlung)
+
+Antworte mit "ja" für faktisch korrekte (logische) Sätze oder "nein" für faktisch falsche (unlogische) Sätze.
+
+Satz: "{sentence}"
+"""
+            response = client.messages.create(
+                model=model,
+                max_tokens=5,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            result = response.content[0].text.strip().lower()
+            return 1 if "ja" in result else 0
+        except Exception as e:
+            print(f"Fehler bei der Validierung (Versuch {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponentielles Backoff
+                print(f"Warte {wait_time} Sekunden vor erneutem Versuch...")
+                time.sleep(wait_time)
+            else:
+                print("Maximale Anzahl von Versuchen erreicht. Fallback-Strategie wird verwendet.")
+                # Im Fehlerfall nutzen wir eine Fallback-Strategie
+                if "spricht" in sentence and any(obj in sentence for obj in ["Tisch", "Stein", "Berg", "Haus"]):
+                    return 0  # Personifizierung unbelebter Objekte
+                return 1  # Im Zweifelsfall als logisch einstufen
+
+def generate_logical_prompt(category, theme, complexity):
+    """Generiert einen Prompt für logische (faktisch korrekte) Sätze basierend auf Kategorie, Thema und Komplexität"""
+    base_prompt = f"Generiere 20 deutsche Sätze zum Thema {theme}."
+
+    category_instructions = {
+        "Faktuell korrekt": "Die Sätze sollten faktisch korrekte Aussagen sein.",
+        "Allgemeinwissen": "Die Sätze sollten faktisch korrekte Aussagen sein, die allgemeines Wissen darstellen.",
+        "Naturwissenschaftliche Fakten": "Die Sätze sollten faktisch korrekte naturwissenschaftliche Aussagen sein.",
+        "Alltägliche Wahrheiten": "Die Sätze sollten faktisch korrekte Aussagen über alltägliche Dinge sein.",
+        "Gängige Kausalzusammenhänge": "Die Sätze sollten faktisch korrekte Kausalzusammenhänge beschreiben."
+    }
+
+    complexity_instructions = {
+        "einfach": "Die Sätze sollten kurz und einfach sein.",
+        "mittel": "Die Sätze sollten mittlere Länge und Komplexität haben.",
+        "komplex": "Die Sätze sollten komplex sein, mit Nebensätzen und anspruchsvollerem Vokabular."
+    }
+
+    return f"{base_prompt} {category_instructions[category]} {complexity_instructions[complexity]}"
+
+def generate_illogical_prompt(category, theme, complexity):
+    """Generiert einen Prompt für unlogische (faktisch falsche) Sätze basierend auf Kategorie, Thema und Komplexität"""
+    base_prompt = f"Generiere 20 grammatikalisch korrekte, aber faktisch falsche deutsche Sätze zum Thema {theme}."
+
+    category_instructions = {
+        "Faktisch falsche Aussagen": "Die Sätze sollten Behauptungen enthalten, die faktisch falsch sind, wie 'Ein Löffel ist eine Gabel' oder 'Hunde bellen nicht gerne'.",
+        "Personifizierung unbelebter Objekte": "Die Sätze sollten unbelebten Objekten menschliche Eigenschaften zuschreiben. Beispiel: 'Die Steine diskutieren über den Sinn des Lebens.'",
+        "Unmögliche Handlungen": "Die Sätze sollten physikalisch unmögliche Handlungen beschreiben. Beispiel: 'Der Berg schwimmt durch den Ozean.'",
+        "Kategorische Widersprüche": "Die Sätze sollten kategorische Widersprüche enthalten. Beispiel: 'Der viereckige Kreis hat eine interessante Geometrie.'",
+        "Falsche Behauptungen": "Die Sätze sollten falsche Behauptungen über die Realität enthalten. Beispiel: 'In Deutschland ist Französisch die Amtssprache.'"
+    }
+
+    complexity_instructions = {
+        "einfach": "Die Sätze sollten kurz und einfach sein.",
+        "mittel": "Die Sätze sollten mittlere Länge und Komplexität haben.",
+        "komplex": "Die Sätze sollten komplex sein, mit Nebensätzen und anspruchsvollerem Vokabular."
+    }
+
+    return f"{base_prompt} {category_instructions[category]} {complexity_instructions[complexity]}"
+
+def save_progress(sentences, labels, filepath="../data/sentences_progress.csv"):
+    """Speichert den aktuellen Fortschritt"""
+    df = pd.DataFrame({
+        "sentence": sentences,
+        "label": labels
+    })
+    df.to_csv(filepath, index=False)
+    print(f"Fortschritt gespeichert in {filepath}")
+
+def print_examples(df, n=5):
+    """Druckt einige Beispielsätze aus dem Datensatz"""
+    print("\nBeispiele für faktisch korrekte (logische) Sätze:")
+    logical_examples = df[df['label'] == 1].sample(min(n, sum(df['label'] == 1)))
+    for _, row in logical_examples.iterrows():
+        print(f"- {row['sentence']}")
+
+    print("\nBeispiele für faktisch falsche (unlogische) Sätze:")
+    illogical_examples = df[df['label'] == 0].sample(min(n, sum(df['label'] == 0)))
+    for _, row in illogical_examples.iterrows():
+        print(f"- {row['sentence']}")
+
+def print_stats(sentences, labels):
+    """Druckt Statistiken zum Datensatz"""
+    print("\nStatistiken des Datensatzes:")
+    print(f"Gesamtzahl der Sätze: {len(sentences)}")
+    print(f"Faktisch korrekte (logische) Sätze: {sum(labels)} ({sum(labels)/len(labels)*100:.1f}%)")
+    print(f"Faktisch falsche (unlogische) Sätze: {len(labels) - sum(labels)} ({(len(labels) - sum(labels))/len(labels)*100:.1f}%)")
+
+def main():
+    parser = argparse.ArgumentParser(description="Generiere Beispielsätze für das Transformer-Training mit Anthropic API")
+    parser.add_argument('--num_per_type', type=int, help='Anzahl zusätzlicher Sätze insgesamt (ERFORDERLICH)')
+    parser.add_argument('--input', type=str, default="../data/sentences.csv", help='Eingabedatei (wird erweitert, falls vorhanden)')
+    parser.add_argument('--output', type=str, default="../data/sentences.csv", help='Ausgabedatei')
+    parser.add_argument('--model', type=str, default=f"{model}", help='Anthropic Modell')
+    parser.add_argument('--delay', type=float, default=0.5, help='Verzögerung zwischen API-Anfragen')
+    parser.add_argument('--stats', action='store_true', help='Nur Statistiken der Eingabedatei ausgeben, ohne neue Sätze zu generieren')
+    parser.add_argument('--examples', type=int, default=5, help='Anzahl der Beispiele, die angezeigt werden sollen')
+    parser.add_argument('--balance-categories', action='store_true', help='Gleichmäßige Verteilung über alle logischen/unlogischen Kategorien')
+    parser.add_argument('--force-logical', action='store_true', help='Generiere nur logische Sätze')
+    parser.add_argument('--force-illogical', action='store_true', help='Generiere nur unlogische Sätze')
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        print("\nBeispiele:")
+        print("  python generate_sentences_anthropic.py --num_per_type 100    # Fügt 100 Sätze hinzu, automatisch ausgeglichen")
+        print("  python generate_sentences_anthropic.py --num_per_type 100 --force-logical   # Fügt 100 logische Sätze hinzu")
+        print("  python generate_sentences_anthropic.py --num_per_type 100 --force-illogical # Fügt 100 unlogische Sätze hinzu")
+        print("  python generate_sentences_anthropic.py --stats               # Zeigt Statistiken der aktuellen Datei")
+        print("  python generate_sentences_anthropic.py --num_per_type 100 --balance-categories # Gleichmäßige Verteilung über Kategorien")
+        sys.exit(1)
+
+    args = parser.parse_args()
+
+    # Überprüfen, ob die Eingabedatei existiert
+    sentences, labels = [], []
+    if os.path.exists(args.input):
+        df = pd.read_csv(args.input)
+        sentences = df["sentence"].tolist()
+        labels = df["label"].tolist()
+        print(f"Vorhandene Datei geladen: {args.input} mit {len(sentences)} Sätzen")
+
+        # Aktuelle Statistik ausgeben
+        print_stats(sentences, labels)
+        print_examples(df, args.examples)
+
+        # Wenn nur Statistiken angefordert wurden, beenden wir hier
+        if args.stats:
+            sys.exit(0)
+    else:
+        print(f"Keine vorhandene Datei gefunden: {args.input}. Erzeuge neue Datei.")
+
+    if args.num_per_type is None:
+        print("FEHLER: --num_per_type muss angegeben werden!")
+        parser.print_help()
+        sys.exit(1)
+
+    # Zählen, wie viele logische und unlogische Sätze wir bereits haben
+    logical_count = sum(labels)
+    illogical_count = len(labels) - logical_count
+
+    # Bestimmen, wie viele Sätze jedes Typs wir generieren sollen
+    if args.force_logical:
+        # Nur logische Sätze
+        new_logical = args.num_per_type
+        new_illogical = 0
+    elif args.force_illogical:
+        # Nur unlogische Sätze
+        new_logical = 0
+        new_illogical = args.num_per_type
+    else:
+        # Automatische Balance - mehr von dem, was wir weniger haben
+        total = logical_count + illogical_count
+
+        # Wenn der Datensatz bereits perfekt ausgewogen ist
+        if logical_count == illogical_count:
+            new_logical = args.num_per_type // 2
+            new_illogical = args.num_per_type - new_logical
+        # Wenn wir mehr logische Sätze brauchen
+        elif logical_count < illogical_count:
+            # Wie viele logische bräuchten wir für Balance?
+            needed_for_balance = illogical_count - logical_count
+
+            # Wenn wir genug hinzufügen können, um auszugleichen
+            if needed_for_balance <= args.num_per_type:
+                new_logical = needed_for_balance
+                new_illogical = args.num_per_type - new_logical
+            # Wenn wir nicht genug hinzufügen können, fügen wir alle als logisch hinzu
+            else:
+                new_logical = args.num_per_type
+                new_illogical = 0
+        # Wenn wir mehr unlogische Sätze brauchen
+        else:
+            # Wie viele unlogische bräuchten wir für Balance?
+            needed_for_balance = logical_count - illogical_count
+
+            # Wenn wir genug hinzufügen können, um auszugleichen
+            if needed_for_balance <= args.num_per_type:
+                new_illogical = needed_for_balance
+                new_logical = args.num_per_type - new_illogical
+            # Wenn wir nicht genug hinzufügen können, fügen wir alle als unlogisch hinzu
+            else:
+                new_illogical = args.num_per_type
+                new_logical = 0
+
+    print(f"Aktuelle Anzahl: {logical_count} logische, {illogical_count} unlogische Sätze")
+    print(f"Geplant: {new_logical} neue logische, {new_illogical} neue unlogische Sätze")
+    print(f"Zukünftige Anzahl: {logical_count + new_logical} logische, {illogical_count + new_illogical} unlogische Sätze")
+
+    # Parameter für die Kategoriebalance
+    if args.balance_categories:
+        # Anzahl Sätze pro Kategorie, falls gleichmäßig verteilt
+        logical_per_category = max(1, new_logical // len(LOGICAL_CATEGORIES))
+        illogical_per_category = max(1, new_illogical // len(ILLOGICAL_CATEGORIES))
+
+        # Zähler für jede Kategorie initialisieren
+        logical_category_counts = {cat: 0 for cat in LOGICAL_CATEGORIES}
+        illogical_category_counts = {cat: 0 for cat in ILLOGICAL_CATEGORIES}
+
+        print(f"Bei Kategorie-Balance: ca. {logical_per_category} pro logische Kategorie, ca. {illogical_per_category} pro unlogische Kategorie")
+
+    # Für bessere Übersicht des Fortschritts
+    if new_logical > 0:
+        pbar_logic = tqdm(total=new_logical, desc="Neue logische Sätze")
+    else:
+        pbar_logic = None
+
+    if new_illogical > 0:
+        pbar_illogic = tqdm(total=new_illogical, desc="Neue unlogische Sätze")
+    else:
+        pbar_illogic = None
+
+    # Zählen, wie viele neue Sätze bereits hinzugefügt wurden
+    added_logical = 0
+    added_illogical = 0
+
+    # Zwischenspeicherung einrichten
+    progress_file = "../data/sentences_progress.csv"
+    save_interval = 20  # Speichern wir alle 20 neuen Sätze
+    last_save = len(sentences)  # Zeitpunkt der letzten Speicherung
+
+    # Liste, um bereits gesehene Sätze zu speichern und Duplikate zu vermeiden
+    existing_sentences = set(sentences)
+
+    # Kombinationen von Themen, Kategorien und Komplexitäten erstellen
+    logical_combinations = []
+    illogical_combinations = []
+
+    for theme in THEMES:
+        for complexity in COMPLEXITY_LEVELS:
+            for category in LOGICAL_CATEGORIES:
+                logical_combinations.append((category, theme, complexity))
+            for category in ILLOGICAL_CATEGORIES:
+                illogical_combinations.append((category, theme, complexity))
+
+    # Zufällige Reihenfolge für bessere Verteilung
+    random.shuffle(logical_combinations)
+    random.shuffle(illogical_combinations)
+
+    # Generator-Loop
+    while ((added_logical < new_logical and logical_combinations) or
+           (added_illogical < new_illogical and illogical_combinations)):
+
+        # Logische Sätze generieren
+        if added_logical < new_logical and logical_combinations:
+            # Wähle eine Kombination aus
+            category, theme, complexity = logical_combinations.pop(0)
+
+            # Überprüfe bei Balance-Option, ob diese Kategorie noch Sätze benötigt
+            if args.balance_categories and logical_category_counts[category] >= logical_per_category:
+                continue
+
+            # Generiere Prompt und Sätze
+            logical_prompt = generate_logical_prompt(category, theme, complexity)
+            num_to_generate = min(20, new_logical - added_logical)
+            logical_sentences = generate_sentences(logical_prompt,
+                                                 num_sentences=num_to_generate,
+                                                 model=args.model)
+
+            for sentence in logical_sentences:
+                # Prüfen, ob wir noch logische Sätze benötigen
+                if added_logical >= new_logical:
+                    break
+
+                # Duplikatprüfung
+                if sentence in existing_sentences:
+                    continue
+
+                # Validieren und hinzufügen
+                label = validate_sentence(sentence, model=args.model)
+                sentences.append(sentence)
+                labels.append(label)
+                existing_sentences.add(sentence)
+
+                if label == 1:
+                    added_logical += 1
+                    if pbar_logic:
+                        pbar_logic.update(1)
+                    if args.balance_categories:
+                        logical_category_counts[category] += 1
+                else:
+                    # Wenn wir noch unlogische Sätze brauchen, zählen wir ihn
+                    if added_illogical < new_illogical:
+                        added_illogical += 1
+                        if pbar_illogic:
+                            pbar_illogic.update(1)
+                    # Sonst überspringen wir ihn
+                    else:
+                        sentences.pop()
+                        labels.pop()
+                        existing_sentences.remove(sentence)
+
+                time.sleep(args.delay)
+
+                # Regelmäßiges Speichern
+                if len(sentences) - last_save >= save_interval:
+                    save_progress(sentences, labels, progress_file)
+                    last_save = len(sentences)
+
+        # Unlogische Sätze generieren
+        if added_illogical < new_illogical and illogical_combinations:
+            # Wähle eine Kombination aus
+            category, theme, complexity = illogical_combinations.pop(0)
+
+            # Überprüfe bei Balance-Option, ob diese Kategorie noch Sätze benötigt
+            if args.balance_categories and illogical_category_counts[category] >= illogical_per_category:
+                continue
+
+            # Generiere Prompt und Sätze
+            illogical_prompt = generate_illogical_prompt(category, theme, complexity)
+            num_to_generate = min(20, new_illogical - added_illogical)
+            illogical_sentences = generate_sentences(illogical_prompt,
+                                                   num_sentences=num_to_generate,
+                                                   model=args.model)
+
+            for sentence in illogical_sentences:
+                # Prüfen, ob wir noch unlogische Sätze benötigen
+                if added_illogical >= new_illogical:
+                    break
+
+                # Duplikatprüfung
+                if sentence in existing_sentences:
+                    continue
+
+                # Validieren und hinzufügen
+                label = validate_sentence(sentence, model=args.model)
+                sentences.append(sentence)
+                labels.append(label)
+                existing_sentences.add(sentence)
+
+                if label == 0:
+                    added_illogical += 1
+                    if pbar_illogic:
+                        pbar_illogic.update(1)
+                    if args.balance_categories:
+                        illogical_category_counts[category] += 1
+                else:
+                    # Wenn wir noch logische Sätze brauchen, zählen wir ihn
+                    if added_logical < new_logical:
+                        added_logical += 1
+                        if pbar_logic:
+                            pbar_logic.update(1)
+                    # Sonst überspringen wir ihn
+                    else:
+                        sentences.pop()
+                        labels.pop()
+                        existing_sentences.remove(sentence)
+
+                time.sleep(args.delay)
+
+                # Regelmäßiges Speichern
+                if len(sentences) - last_save >= save_interval:
+                    save_progress(sentences, labels, progress_file)
+                    last_save = len(sentences)
+
+        # Wenn keine Kombinationen mehr übrig sind, aber die Zielanzahl noch nicht erreicht ist,
+        # generieren wir neue Kombinationen
+        if not logical_combinations and added_logical < new_logical:
+            print("\nGeneriere neue Kombinationen für logische Sätze...")
+            logical_combinations = [(cat, theme, level)
+                                   for cat in LOGICAL_CATEGORIES
+                                   for theme in THEMES
+                                   for level in COMPLEXITY_LEVELS]
+            random.shuffle(logical_combinations)
+
+        if not illogical_combinations and added_illogical < new_illogical:
+            print("\nGeneriere neue Kombinationen für unlogische Sätze...")
+            illogical_combinations = [(cat, theme, level)
+                                     for cat in ILLOGICAL_CATEGORIES
+                                     for theme in THEMES
+                                     for level in COMPLEXITY_LEVELS]
+            random.shuffle(illogical_combinations)
+
+    # Fortschrittsbalken schließen
+    if pbar_logic:
+        pbar_logic.close()
+    if pbar_illogic:
+        pbar_illogic.close()
+
+    # Endgültiges DataFrame erstellen und speichern
+    df = pd.DataFrame({
+        "sentence": sentences,
+        "label": labels
+    })
+
+    # Statistiken über die Kategorieverteilung
+    if args.balance_categories:
+        print("\nVerteilung der logischen Kategorien:")
+        for category, count in logical_category_counts.items():
+            print(f"  {category}: {count} Sätze")
+
+        print("\nVerteilung der unlogischen Kategorien:")
+        for category, count in illogical_category_counts.items():
+            print(f"  {category}: {count} Sätze")
+
+    # Statistiken drucken
+    print_stats(sentences, labels)
+
+    # Speichern
+    df.to_csv(args.output, index=False)
+    print(f"Datensatz gespeichert als '{args.output}'.")
+
+    # Einige Beispiele anzeigen
+    print_examples(df, args.examples)
+
+    # Aufräumen
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+        print(f"Fortschrittsdatei {progress_file} gelöscht.")
+
+if __name__ == "__main__":
+    main()
+
+
+
+### ./README.md ###
+# Logische Satzerkennung mit Transformer
+
+Dieses Projekt implementiert ein Transformer-basiertes Modell zur Erkennung logisch sinnvoller Sätze. Das System kann zwischen semantisch korrekten Aussagen und grammatikalisch richtigen, aber logisch unsinnigen Sätzen unterscheiden.
+
+## 🎯 Überblick
+
+Das Modell klassifiziert Sätze in zwei Kategorien:
+- **Logisch (1)**: Faktisch korrekte Aussagen (z.B. "Die Sonne geht im Osten auf")
+- **Nicht logisch (0)**: Semantisch unsinnige Aussagen (z.B. "Der Tisch ist traurig")
+
+### Kernfunktionen
+
+- Eigenständiges Embedding und Transformer-Modell
+- Tokenisierung und Vokabulargenerierung
+- Pre-Normalization Transformer-Architektur mit Multi-Head Attention
+- Umfangreiche Diagnose- und Analysewerkzeuge
+- REST-API für Produktivbetrieb
+
+## 📋 Projektstruktur
+
+```
+├── config.json             # Modellkonfiguration
+├── data/                   # Datensätze
+│   └── sentences.csv       # Trainingsdaten
+│   └── vocab.json          # Generiertes Vokabular
+├── models/                 # Gespeicherte Modelle
+├── src/                    # Quellcode
+│   ├── api.py              # FastAPI-Schnittstelle
+│   ├── dataset.py          # Daten-Handling und Tokenisierung
+│   ├── diagnostic_tool.py  # Umfassendes Diagnosewerkzeug
+│   ├── evaluate.py         # Modellauswertung
+│   ├── generate_sentences_claude.py # Datengenerierung mit Claude
+│   ├── generate_sentences_gpt4o.py  # Datengenerierung mit GPT-4o
+│   ├── model.py            # Transformer-Modell
+│   ├── rebuild-vocab.py    # Vokabular-Neuerstellung
+│   ├── test_dataset.py     # Dataset-Tests
+│   ├── test_model.py       # Modell-Tests
+│   └── train.py            # Trainingslogik
+├── docs/                   # Zusätzliche Dokumentation
+└── requirements.txt        # Abhängigkeiten
+```
+
+## 🛠️ Installation
+
+### Voraussetzungen
+
+- Python 3.10+
+- PyTorch
+- FastAPI (für API-Betrieb)
+- Pandas, NumPy, Scikit-learn, Matplotlib
+
+### Einrichtung
+
+1. Repository klonen:
+   ```bash
+   git clone https://github.com/yourusername/sentence-logic-transformer.git
+   cd sentence-logic-transformer
+   ```
+
+2. Virtuelle Umgebung erstellen und aktivieren:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Unter Windows: venv\Scripts\activate
+   ```
+
+3. Abhängigkeiten installieren:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. Umgebungsvariablen für API-Zugriff (optional für Datengenerierung):
+   Erstelle eine `.env`-Datei im Wurzelverzeichnis:
+   ```
+   OPENAI_API_KEY=dein_openai_key
+   ANTHROPIC_API_KEY=dein_anthropic_key
+   ```
+
+## 📊 Datensatz
+
+Der Datensatz besteht aus deutschen Sätzen, die als "logisch" oder "nicht logisch" gekennzeichnet sind. Es wird eine `sentences.csv` mit folgendem Format verwendet:
+
+```csv
+sentence,label
+"Die Sonne geht im Osten auf.",1
+"Wasser besteht aus Wasserstoff und Sauerstoff.",1
+"Der Tisch ist traurig über die Situation.",0
+"Berge können schwimmen und Flüsse klettern.",0
+```
+
+### Datengenerierung
+
+Das Projekt enthält zwei Skripte zur Datengenerierung:
+
+- **Mit OpenAI GPT-4o**:
+  ```bash
+  python src/generate_sentences_gpt4o.py --num_per_type 100 --balance-categories
+  ```
+
+- **Mit Anthropic Claude**:
+  ```bash
+  python src/generate_sentences_claude.py --num_per_type 100 --balance-categories
+  ```
+
+Weitere Optionen:
+- `--force-logical`: Generiert nur logische Sätze
+- `--force-illogical`: Generiert nur unlogische Sätze
+- `--stats`: Zeigt nur Statistiken des vorhandenen Datensatzes
+
+## 🧠 Modellarchitektur
+
+Das Modell besteht aus drei Hauptkomponenten:
+
+1. **Embedding-Schicht**:
+   - Wandelt Wörter in numerische Embeddings um
+   - Positionsenkodierung für sequentielle Information
+
+2. **Transformer-Encoder**:
+   - Multi-Head Attention für kontextuelle Verarbeitung
+   - Pre-Normalization für stabiles Training
+   - Residual-Verbindungen für besseren Gradientenfluss
+
+3. **Klassifikationsschicht**:
+   - Pooling der Tokenrepräsentationen
+   - Lineare Projektion für binäre Klassifikation
+
+### Konfiguration
+
+Die `config.json` steuert die Modellparameter:
+
+```json
+{
+    "embedding_dim": 256,
+    "num_heads": 8,
+    "num_layers": 4,
+    "num_classes": 2,
+    "dropout": 0.2,
+    "batch_size": 32,
+    "num_epochs": 50,
+    "learning_rate": 0.0001
+}
+```
+
+## 🚀 Training
+
+Das Training des Modells erfolgt mit:
+
+```bash
+cd src
+python train.py
+```
+
+Mit Neuaufbau des Vokabulars:
+
+```bash
+python train.py --rebuild-vocab
+```
+
+Das Modell wird in `models/transformer_model.pth` gespeichert.
+
+## 📈 Evaluation und Diagnose
+
+Das Projekt bietet umfangreiche Diagnosefunktionen:
+
+```bash
+python src/diagnostic_tool.py --all --visualize --output-dir results
+```
+
+Einzelne Diagnoseoptionen:
+- `--evaluate`: Modellbewertung
+- `--vocab`: Vokabularanalyse
+- `--errors`: Fehleranalyse
+- `--test`: Beispielsätze testen
+- `--sentence "Dein Testsatz"`: Einzelnen Satz testen
+
+Für schnelle Auswertung:
+```bash
+python src/evaluate.py
+```
+
+## 🌐 API-Nutzung
+
+Starten der API:
+
+```bash
+cd src
+uvicorn api:app --reload
+```
+
+Die API ist unter http://localhost:8000 erreichbar mit folgenden Endpunkten:
+
+- **GET /**: Willkommensseite
+- **GET /health**: Healthcheck
+- **GET /vocab_info**: Vokabularinformationen
+- **GET /test**: Standardbeispiele testen
+- **POST /predict**: Satzvorhersage
+
+Beispielanfrage:
+```bash
+curl -X POST "http://localhost:8000/predict" \
+     -H "Content-Type: application/json" \
+     -d '{"sentence": "Die Sonne scheint."}'
+```
+
+Antwort:
+```json
+{
+  "sentence": "Die Sonne scheint.",
+  "prediction": "logisch",
+  "confidence": 0.9876,
+  "token_count": 4,
+  "unknown_words": null,
+  "unknown_ratio": 0.0,
+  "processing_time": 5.432
+}
+```
+
+Eine Swagger-UI ist unter http://localhost:8000/docs verfügbar.
+
+## 🐳 Docker
+
+Das Projekt kann containerisiert werden:
+
+```bash
+# Docker-Image bauen
+docker build -t sentence-logic-api .
+
+# Container starten
+docker run -p 8000:8000 sentence-logic-api
+```
+
+## 🔧 Fehlerbehebung
+
+### Häufige Probleme
+
+1. **Unbekannte Wörter**: Überprüfen Sie mit `diagnostic_tool.py --vocab`, ob wichtige Wörter im Vokabular fehlen. Bei Bedarf:
+   ```bash
+   python src/rebuild-vocab.py
+   ```
+
+2. **Falsche Vorhersagen**: Führen Sie eine Fehleranalyse durch:
+   ```bash
+   python src/diagnostic_tool.py --errors --visualize
+   ```
+
+3. **API-Fehler**: Überprüfen Sie, ob die richtigen Modell- und Vokabulardateien geladen wurden.
+
+## 📝 Leistung und Ergebnisse
+
+Bei einem ausgewogenen Datensatz mit ~1000 Beispielen kann das Modell eine Genauigkeit von über 95% erreichen. Die Leistung hängt stark von der Qualität und Größe der Trainingsdaten ab.
+
+Empfehlungen für optimale Ergebnisse:
+- Mindestens 500 Sätze je Klasse
+- Ausgewogene Verteilung verschiedener Satztypen
+- Vokabular mit häufigen Wörtern und Domainbegriffen
+
+## 🤝 Mitwirken
+
+Beiträge sind willkommen! Mögliche Verbesserungen:
+- Erweiterte Tokenisierungsmethoden
+- Mehrsprachige Unterstützung
+- Feinere Klassifikationskategorien
+- Integration in größere NLP-Pipelines
+
+## 📄 Lizenz
+
+Dieses Projekt steht unter der MIT-Lizenz.
+
+
+
+### ./config.json ###
+{
+    "embedding_dim": 384,
+    "num_heads": 12,
+    "num_classes": 2,
+    "num_layers": 6,
+    "dropout": 0.15,
+    "batch_size": 32,
+    "num_epochs": 100,
+    "learning_rate": 0.00002,
+    "validation_split": 0.15,
+
+    "use_lr_scheduler": true,
+    "lr_scheduler_type": "reduce_on_plateau",
+    "lr_scheduler_factor": 0.5,
+    "lr_scheduler_patience": 5,
+    "use_warmup": true,
+    "warmup_steps": 300,
+
+    "early_stopping": true,
+    "early_stopping_patience": 20,
+    "early_stopping_min_delta": 0.0005,
+    "eval_metric": "f1",
+
+    "use_class_weights": false,
+
+    "use_layer_norm": true,
+    "use_residual_gating": true,
+    "feedforward_multiplier": 4,
+    "attention_dropout": 0.1,
+    "use_gelu": true,
+    "weight_decay": 0.005,
+    "gradient_clip_val": 1.0
+}
+
+
+
+### ./requirements.txt ###
+annotated-types==0.7.0
+anyio==4.8.0
+certifi==2025.1.31
+click==8.1.8
+contourpy==1.3.1
+cycler==0.12.1
+distro==1.9.0
+dotenv==0.9.9
+exceptiongroup==1.2.2
+fastapi==0.115.11
+filelock==3.17.0
+fonttools==4.56.0
+fsspec==2025.3.0
+h11==0.14.0
+httpcore==1.0.7
+httpx==0.28.1
+idna==3.10
+Jinja2==3.1.6
+jiter==0.8.2
+joblib==1.4.2
+kiwisolver==1.4.8
+MarkupSafe==3.0.2
+matplotlib==3.10.1
+mpmath==1.3.0
+networkx==3.4.2
+numpy==2.2.3
+nvidia-cublas-cu12==12.4.5.8
+nvidia-cuda-cupti-cu12==12.4.127
+nvidia-cuda-nvrtc-cu12==12.4.127
+nvidia-cuda-runtime-cu12==12.4.127
+nvidia-cudnn-cu12==9.1.0.70
+nvidia-cufft-cu12==11.2.1.3
+nvidia-curand-cu12==10.3.5.147
+nvidia-cusolver-cu12==11.6.1.9
+nvidia-cusparse-cu12==12.3.1.170
+nvidia-cusparselt-cu12==0.6.2
+nvidia-nccl-cu12==2.21.5
+nvidia-nvjitlink-cu12==12.4.127
+nvidia-nvtx-cu12==12.4.127
+openai==1.65.5
+packaging==24.2
+pandas==2.2.3
+pillow==11.1.0
+pydantic==2.10.6
+pydantic_core==2.27.2
+pyparsing==3.2.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.0.1
+pytz==2025.1
+scikit-learn==1.6.1
+scipy==1.15.2
+seaborn==0.13.2
+six==1.17.0
+sniffio==1.3.1
+starlette==0.46.1
+sympy==1.13.1
+threadpoolctl==3.5.0
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
+tqdm==4.67.1
+triton==3.2.0
+typing_extensions==4.12.2
+tzdata==2025.1
+uvicorn==0.34.0
+
+
+
+### ./docker-build-run.sh ###
+#!/bin/bash
+
+docker build -t transformer-api .
+docker run -p 8000:8000 transformer-api
+
+
+
+### ./Dockerfile ###
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Systemabhängigkeiten installieren
+RUN apt-get update && apt-get install -y build-essential && rm -rf /var/lib/apt/lists/*
+
+# Python aktualisieren und Abhängigkeiten installieren
+RUN pip install --upgrade pip
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install fastapi uvicorn numpy pandas scikit-learn
+
+# Projektdateien kopieren
+COPY ./src ./src
+COPY ./data ./data
+COPY ./models ./models
+COPY ./config.json ./config.json
+
+# Port freigeben
+EXPOSE 8000
+
+# API starten
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+
+### Ignorierte Dateien (nicht in INCLUDE_FILES) ###
